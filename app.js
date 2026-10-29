@@ -2,6 +2,7 @@
 // Data: Supabase (row-level security, owner only). Metadata: TMDB (film/TV) and RAWG (games).
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.57.4/+esm";
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from "./config.js";
+import { norm, findOwned, pickMatch, withName } from "./match.js";
 
 /* ---------- helpers ---------- */
 const $ = (s, el = document) => el.querySelector(s);
@@ -13,11 +14,6 @@ const store = {
   get(k) { try { return localStorage.getItem(k) || ""; } catch { return ""; } },
   set(k, v) { try { v ? localStorage.setItem(k, v) : localStorage.removeItem(k); } catch {} },
 };
-const norm = (s) => String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase()
-  .replace(/[™®©]/g, "")
-  .replace(/\b(ps4|ps5|playstation ?[45]|xbox series x\|s|xbox one|nintendo switch|switch|pc)\b/g, "")
-  .replace(/\b(edition|remastered|definitive|complete|game of the year|goty|deluxe|digital|standard)\b/g, "")
-  .replace(/[^a-z0-9]+/g, " ").trim();
 const fmtHours = (h) => (h == null || h === "" ? "" : `${(+h).toLocaleString("en-GB", { maximumFractionDigits: 1 })}h`);
 const fmtDate = (d) => d ? new Date(d + "T00:00:00").toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" }) : "";
 
@@ -129,6 +125,12 @@ async function saveItem(meta, patch = {}) {
     res = await S.sb.from("items").update(upd).eq("id", existing.id).select().single();
   } else {
     res = await S.sb.from("items").insert({ ...fresh, ...patch }).select().single();
+  }
+  if (res.error && /import_names/.test(res.error.message) && ("import_names" in patch)) {
+    // database predates migrations/001_import_names.sql: save without the alias list
+    if (!S.warnedAliases) { S.warnedAliases = true; toast("Run migrations/001_import_names.sql in Supabase so re-imports remember your matches", true); }
+    const { import_names, ...rest } = patch;
+    return saveItem(meta, rest);
   }
   if (res.error) { toast(res.error.message, true); throw res.error; }
   putItem(res.data);
@@ -395,7 +397,8 @@ function drawItem() {
         ${row ? `<div class="panel"><h2>Manage</h2>
           ${t === "game" ? `<button class="btn" data-act="rematch">Wrong game? Change match</button>` : ""}
           <button class="btn danger" data-act="remove-item">Remove from library</button>
-          <p class="hint">Added ${fmtDate((row.created_at || "").slice(0, 10))}${row.source === "manual" ? " · not linked to the game database" : ""}</p></div>` : ""}
+          <p class="hint">Added ${fmtDate((row.created_at || "").slice(0, 10))}${row.source === "manual" ? " · not linked to the game database" : ""}</p>
+          ${t === "game" && row.import_names?.length ? `<p class="hint">Imports as: ${row.import_names.map(esc).join(", ")}</p>` : ""}</div>` : ""}
       </div>
     </div>
   </div>`;
@@ -635,18 +638,17 @@ async function runImport() {
   const log = $("#imp-log"), bar = $("#imp-bar"); $("#imp-progress").hidden = false; log.textContent = "";
   const say = (s) => { log.textContent += s + "\n"; log.scrollTop = log.scrollHeight; };
   say(`${todo.length} games to import${skip ? ` (${rows.length - todo.length} under 1h skipped)` : ""}`);
-  const games = allItems().filter((i) => i.media_type === "game");
   let ok = 0, unmatched = 0, fuzzy = 0;
   for (let n = 0; n < todo.length; n++) {
     const r = todo[n]; const plat = r.platform || "Unknown"; const hours = Math.round((+r.hours || 0) * 10) / 10;
     try {
-      let row = games.find((g) => norm(g.title) === norm(r.title));
+      // always look in the live library, so rows earlier in this file (and your own re-matches) are seen
+      let row = findOwned(allItems(), r.title);
       let meta = row;
       if (!row) {
-        const res = await rawg("/games", { search: r.title.replace(/[™®]/g, ""), page_size: "5" });
-        const exact = res.results.find((g) => norm(g.name) === norm(r.title));
-        const pick = exact || res.results[0];
-        if (pick) { meta = metaFromRawg(pick); if (!exact) { fuzzy++; say(`~ "${r.title}" matched to "${pick.name}" (check it)`); } }
+        const res = await rawg("/games", { search: r.title.replace(/[™®]/g, ""), page_size: "8" });
+        const m = pickMatch(res.results, r.title, plat);
+        if (m) { meta = metaFromRawg(m.pick); if (!m.exact) { fuzzy++; say(`~ "${r.title}" matched to "${m.pick.name}" (check it)`); } }
         else { meta = { media_type: "game", source: "manual", ext_id: norm(r.title).replace(/ /g, "-") || "game-" + n, title: r.title, year: null, poster: null }; unmatched++; say(`? "${r.title}" not found, added without artwork`); }
         row = S.items.get(keyOf("game", meta.source, meta.ext_id));
       }
@@ -658,6 +660,8 @@ async function runImport() {
       const specific = Object.entries(hbp).filter(([k]) => k !== COMBINED).reduce((a, [, h]) => a + +h, 0);
       const totalH = Math.round(Math.max(+hbp[COMBINED] || 0, specific) * 10) / 10;
       const patch = { hours_by_platform: hbp, hours: totalH || row?.hours || null, platforms: [...new Set([...(row?.platforms || []), ...platList])] };
+      const names = withName(row || meta, r.title);
+      if (names.length !== (row?.import_names || []).length) patch.import_names = names;
       if (r.last_played && (!row?.last_played || r.last_played > row.last_played)) patch.last_played = r.last_played.slice(0, 10);
       if (r.first_played && !row?.started_on) patch.started_on = r.first_played.slice(0, 10);
       if (r.trophies) patch.trophies = r.trophies;
@@ -665,8 +669,7 @@ async function runImport() {
         const s = (r.status || "").toLowerCase();
         patch.status = STATUS_ORDER.includes(s) ? s : /platinum|100%/i.test(r.trophies || "") ? "finished" : "progress";
       }
-      const saved = await saveItem(meta, patch);
-      if (!games.includes(saved)) games.push(saved);
+      await saveItem(meta, patch);
       ok++;
     } catch (e) { say(`! "${r.title}": ${e.message}`); }
     bar.style.width = `${((n + 1) / todo.length) * 100}%`;
@@ -787,9 +790,20 @@ function openRematch() {
       const b = e.target.closest('[data-act="rm-pick"]'); if (!b) return; e.stopPropagation();
       const g = results[+b.dataset.i];
       if (S.items.has(keyOf("game", g.source, g.ext_id))) return toast("That game is already in your library", true);
-      const { data, error } = await S.sb.from("items").update({ source: g.source, ext_id: g.ext_id, title: g.title, year: g.year, poster: g.poster, genres: g.genres || [] }).eq("id", row.id).select().single();
+      const upd = { source: g.source, ext_id: g.ext_id, title: g.title, year: g.year, poster: g.poster, genres: g.genres || [] };
+      // keep the old title as an import name, so the next PlayStation/Steam import lands on your pick
+      const names = withName({ ...row, title: g.title }, row.title);
+      if (names.length) upd.import_names = names;
+      let { data, error } = await S.sb.from("items").update(upd).eq("id", row.id).select().single();
+      if (error && /import_names/.test(error.message)) {
+        delete upd.import_names;
+        ({ data, error } = await S.sb.from("items").update(upd).eq("id", row.id).select().single());
+        if (!error) upd.noAliases = true;
+      }
       if (error) return toast(error.message, true);
-      dropItem(row); putItem(data); closeModal(); toast("Match updated");
+      dropItem(row); putItem(data); closeModal();
+      if (!upd.noAliases) toast("Match updated");
+      else toast("Match updated. Run migrations/001_import_names.sql so imports remember it", true);
       location.hash = itemHref(data);
     });
   });
