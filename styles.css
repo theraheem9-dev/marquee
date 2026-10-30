@@ -253,3 +253,9 @@ textarea.input { min-height: 96px; resize: vertical; }
 .toast.err { background: var(--danger); color: #fff; }
 
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+/* Game page: hours, platform split, trophies, last played */
+.play-stats { display: grid; gap: 4px; }
+.ps-hours { font-family: "Bricolage Grotesque", sans-serif; font-weight: 800; font-size: clamp(30px, 6vw, 44px); line-height: 1; color: var(--game); }
+.ps-hours span { font-family: "Schibsted Grotesk", sans-serif; font-weight: 500; font-size: 14px; color: var(--muted); margin-left: 8px; }
+.ps-line { color: var(--muted); font-size: 14px; }

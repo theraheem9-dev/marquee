@@ -333,6 +333,19 @@ function starsWidget(v) {
   }
   return h + `<span class="rating-val">${v ? (+v).toFixed(1) : ""}</span></div>`;
 }
+function playStats(row) {
+  if (!row) return "";
+  const byPlat = Object.entries(row.hours_by_platform || {}).filter(([p, h]) => p !== COMBINED && +h > 0).sort((a, b) => +b[1] - +a[1]);
+  const total = row.hours != null && row.hours !== "" ? +row.hours : byPlat.reduce((n, [, h]) => n + +h, 0);
+  const split = byPlat.length > 1 ? byPlat.map(([p, h]) => `${esc(p)} ${fmtHours(h)}`).join(" · ") : (row.platforms || []).map(esc).join(" · ");
+  const bits = [row.trophies ? `Trophies: ${esc(row.trophies)}` : "", row.last_played ? `Last played ${fmtDate(row.last_played)}` : ""].filter(Boolean);
+  if (!total && !split && !bits.length) return "";
+  return `<div class="play-stats">
+    ${total ? `<div class="ps-hours num">${fmtHours(total)}<span>played</span></div>` : ""}
+    ${split ? `<div class="ps-line">${split}</div>` : ""}
+    ${bits.length ? `<div class="ps-line">${bits.join(" · ")}</div>` : ""}
+  </div>`;
+}
 function drawItem() {
   const { meta, extra, d } = current;
   const t = meta.media_type;
@@ -365,6 +378,7 @@ function drawItem() {
         <h1>${esc(meta.title)}${meta.year ? `<span class="yr num">${meta.year}</span>` : ""}</h1>
         ${facts.length ? `<div class="facts">${facts.map((f) => `<span>${esc(f)}</span>`).join("")}</div>` : ""}
         ${extra.cast?.length ? `<div class="facts"><span>With ${esc(extra.cast.join(", "))}</span></div>` : ""}
+        ${t === "game" ? playStats(row) : ""}
         ${extra.overview ? `<p class="overview">${esc(extra.overview.length > 700 ? extra.overview.slice(0, 700).replace(/\s+\S*$/, "") + "…" : extra.overview)}</p>` : ""}
       </div>
     </div>
