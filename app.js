@@ -25,11 +25,11 @@ function toast(msg, err = false) {
 }
 
 const TYPES = {
-  movie: { label: "Film", plural: "Films", status: { want: "Watchlist", progress: "Watching", finished: "Watched", dropped: "Dropped" } },
-  tv: { label: "Series", plural: "TV", status: { want: "Watchlist", progress: "Watching", finished: "Watched", dropped: "Dropped" } },
-  game: { label: "Game", plural: "Games", status: { want: "Backlog", progress: "Playing", finished: "Played", dropped: "Dropped" } },
+  movie: { label: "Film", plural: "Films", status: { wishlist: "Wishlist", want: "Watchlist", progress: "Watching", finished: "Watched", dropped: "Dropped" } },
+  tv: { label: "Series", plural: "TV", status: { wishlist: "Wishlist", want: "Watchlist", progress: "Watching", finished: "Watched", dropped: "Dropped" } },
+  game: { label: "Game", plural: "Games", status: { wishlist: "Wishlist", want: "Backlog", progress: "Playing", finished: "Played", dropped: "Dropped" } },
 };
-const STATUS_ORDER = ["want", "progress", "finished", "dropped"];
+const STATUS_ORDER = ["wishlist", "want", "progress", "finished", "dropped"];
 const COMBINED = "All platforms";
 
 /* ---------- state ---------- */
@@ -41,6 +41,7 @@ const S = {
   homeType: store.get("m.homeType") || "all",
   lib: { type: store.get("m.libType") || "all", status: "all", fav: false, sort: "recent" },
 };
+const CAL = { view: store.get("m.calView") || "mine", type: "all", mine: null, all: null };
 const keyOf = (t, s, e) => `${t}:${s}:${e}`;
 const putItem = (row) => { S.items.set(keyOf(row.media_type, row.source, row.ext_id), row); S.byId.set(row.id, row); };
 const dropItem = (row) => { S.items.delete(keyOf(row.media_type, row.source, row.ext_id)); S.byId.delete(row.id); };
@@ -69,6 +70,14 @@ async function rawg(path, params = {}) {
   return r.json();
 }
 const rawgImg = (u, w = 420) => (u ? u.replace("/media/", `/media/resize/${w}/-/`) : null);
+// UK cinema date when TMDB has one, otherwise the worldwide date
+function ukRelease(d) {
+  const gb = d.release_dates?.results?.find((r) => r.iso_3166_1 === "GB");
+  const ds = (gb?.release_dates || []).filter((x) => x.type === 2 || x.type === 3).map((x) => x.release_date.slice(0, 10)).sort();
+  return ds[0] || d.release_date || null;
+}
+const isUpcoming = (m) => (m.release_date ? m.release_date > today() : !m.year);
+const addStatus = (m) => (isUpcoming(m) ? "wishlist" : "want");
 const yearOf = (d) => (d ? parseInt(String(d).slice(0, 4), 10) || null : null);
 
 function metaFromTmdb(r, type, full = false) {
@@ -77,6 +86,7 @@ function metaFromTmdb(r, type, full = false) {
     title: r.title || r.name || "Untitled",
     year: yearOf(r.release_date || r.first_air_date),
     poster: r.poster_path ? TMDB_IMG + "w342" + r.poster_path : null,
+    release_date: (type === "movie" ? (full ? ukRelease(r) : r.release_date) : r.first_air_date) || null,
   };
   if (full) {
     m.genres = (r.genres || []).map((g) => g.name);
@@ -85,7 +95,7 @@ function metaFromTmdb(r, type, full = false) {
   return m;
 }
 function metaFromRawg(g, full = false) {
-  const m = { media_type: "game", source: "rawg", ext_id: String(g.id), title: g.name, year: yearOf(g.released), poster: rawgImg(g.background_image) };
+  const m = { media_type: "game", source: "rawg", ext_id: String(g.id), title: g.name, year: yearOf(g.released), poster: rawgImg(g.background_image), release_date: g.tba ? null : g.released || null };
   if (full || g.genres) m.genres = (g.genres || []).map((x) => x.name);
   return m;
 }
@@ -110,11 +120,13 @@ async function loadEverything() {
   S.items.clear(); S.byId.clear(); items.forEach(putItem);
   S.diary = diary; S.lists = lists; S.listItems = listItems; S.showcase = showcase;
 }
-const META_FIELDS = ["media_type", "source", "ext_id", "title", "year", "poster", "genres", "runtime_min"];
+const META_FIELDS = ["media_type", "source", "ext_id", "title", "year", "poster", "genres", "runtime_min", "release_date"];
 async function saveItem(meta, patch = {}) {
   const existing = S.items.get(keyOf(meta.media_type, meta.source, meta.ext_id));
   const fresh = {};
   for (const f of META_FIELDS) if (meta[f] !== undefined && meta[f] !== null) fresh[f] = meta[f];
+  if (S.noRelease) { delete fresh.release_date; delete patch.release_date; }
+  CAL.mine = null; // calendar recalculates after any change
   let res;
   if (existing) {
     const upd = { ...patch };
@@ -122,6 +134,7 @@ async function saveItem(meta, patch = {}) {
     if (fresh.genres?.length && !existing.genres?.length) upd.genres = fresh.genres;
     if (fresh.runtime_min && !existing.runtime_min) upd.runtime_min = fresh.runtime_min;
     if (fresh.poster && !existing.poster) upd.poster = fresh.poster;
+    if (fresh.release_date && fresh.release_date !== existing.release_date) upd.release_date = fresh.release_date;
     res = await S.sb.from("items").update(upd).eq("id", existing.id).select().single();
   } else {
     res = await S.sb.from("items").insert({ ...fresh, ...patch }).select().single();
@@ -131,6 +144,11 @@ async function saveItem(meta, patch = {}) {
     if (!S.warnedAliases) { S.warnedAliases = true; toast("Run migrations/001_import_names.sql in Supabase so re-imports remember your matches", true); }
     const { import_names, ...rest } = patch;
     return saveItem(meta, rest);
+  }
+  if (res.error && /release_date|status_check/.test(res.error.message) && !S.noRelease) {
+    // database predates migrations/002_wishlist.sql
+    S.noRelease = true; toast("Run migrations/002_wishlist.sql in Supabase to turn on the wishlist and release dates", true);
+    if (patch.status !== "wishlist") return saveItem(meta, patch);
   }
   if (res.error) { toast(res.error.message, true); throw res.error; }
   putItem(res.data);
@@ -161,8 +179,9 @@ function card(m, opts = {}) {
   const badges = [];
   if (mine?.favourite) badges.push(`<span class="badge fav" title="Favourite">♥</span>`);
   if (t === "game" && mine?.hours) badges.push(`<span class="badge num">${fmtHours(mine.hours)}</span>`);
+  const qLabel = `Add to ${TYPES[t].status[addStatus(m)]}`;
   const quick = opts.quick && !mine?.status
-    ? `<button class="quick" data-act="quick-add" data-key="${esc(keyOf(t, m.source, m.ext_id))}" title="Add to ${TYPES[t].status.want}" aria-label="Add to ${TYPES[t].status.want}">+</button>` : "";
+    ? `<button class="quick" data-act="quick-add" data-key="${esc(keyOf(t, m.source, m.ext_id))}" title="${qLabel}" aria-label="${qLabel}">+</button>` : "";
   const status = mine?.status ? `<span>${esc(TYPES[t].status[mine.status])}</span>` : "";
   return `<div class="card" data-type="${t}">
     <a href="${itemHref(m)}" class="poster" aria-label="${esc(m.title)}">${img}<span class="type-strip"></span><span class="badges">${badges.join("")}</span></a>
@@ -208,6 +227,7 @@ async function route() {
     else if (name === "library") renderLibrary();
     else if (name === "diary") renderDiary();
     else if (name === "lists") renderLists();
+    else if (name === "calendar") await renderCalendar();
     else if (name === "list") renderList(parts[1]);
     else if (name === "stats") renderStats();
     else if (name === "settings") renderSettings();
@@ -225,6 +245,7 @@ function renderHome() {
   const byUpd = (a, b) => (b.updated_at || "").localeCompare(a.updated_at || "");
   const progress = pool.filter((i) => i.status === "progress").sort(byUpd);
   const want = pool.filter((i) => i.status === "want").sort(byUpd);
+  const wish = pool.filter((i) => i.status === "wishlist").sort((a, b) => (a.release_date || "9999").localeCompare(b.release_date || "9999"));
   const favs = pool.filter((i) => i.favourite).sort(byUpd);
   const recent = S.diary.filter((d) => S.byId.has(d.item_id) && (t === "all" || S.byId.get(d.item_id).media_type === t)).slice(0, 14).map((d) => S.byId.get(d.item_id));
   const seen = new Set(); const recentU = recent.filter((i) => !seen.has(i.id) && seen.add(i.id));
@@ -241,6 +262,7 @@ function renderHome() {
     ${empty ? `<div class="empty"><strong>Your library is empty.</strong><span>Use the search bar above, or import your PlayStation and Steam history from Settings.</span><div style="display:flex;gap:8px;flex-wrap:wrap"><a class="btn primary" href="#/search">Search titles</a><a class="btn" href="#/settings">Import games</a></div></div>` : ""}
     ${showcase.map(({ m, slots }) => `<section class="section"><div class="section-head"><h2>Top four ${TYPES[m].plural.toLowerCase()}</h2></div><div class="grid" style="grid-template-columns:repeat(4,minmax(0,1fr));max-width:620px">${slots.map((i) => i ? card(i) : `<div class="poster" style="opacity:.4"></div>`).join("")}</div></section>`).join("")}
     ${empty ? "" : row(t === "game" ? "Playing now" : t === "all" ? "In progress" : "Watching now", progress, "#/library?status=progress", "Nothing in progress. Mark something as Watching or Playing.")}
+    ${empty || !wish.length ? "" : row("Wishlist", wish, "#/calendar", "")}
     ${empty ? "" : row(t === "game" ? "Backlog" : t === "all" ? "Watchlist and backlog" : "Watchlist", want, "#/library?status=want", "Nothing queued up yet. Tap + on any search result to add it.")}
     ${empty ? "" : row("Favourites", favs, null, "Tap the heart on any title to make it a favourite.")}
     ${empty ? "" : row("Recently logged", recentU, "#/diary", "Log a watch or a finished game and it will show here.")}
@@ -284,7 +306,7 @@ async function renderItem(type, source, ext) {
   let d = null, extra = {};
   try {
     if (source === "tmdb") {
-      d = await tmdb(`/${type}/${ext}`, { append_to_response: "credits" });
+      d = await tmdb(`/${type}/${ext}`, { append_to_response: type === "movie" ? "credits,release_dates" : "credits" });
       meta = { ...meta, ...metaFromTmdb(d, type, true) };
       const crew = d.credits?.crew || [], cast = (d.credits?.cast || []).slice(0, 5).map((c) => c.name);
       extra = {
@@ -313,7 +335,7 @@ async function renderItem(type, source, ext) {
   current = { meta, d, extra, episodes: new Set() };
   const row = S.items.get(keyOf(type, source, ext));
   // quietly backfill genres/runtime for titles added from search results
-  if (row && d && ((!row.genres?.length && meta.genres?.length) || (!row.runtime_min && meta.runtime_min) || (!row.poster && meta.poster))) {
+  if (row && d && ((!row.genres?.length && meta.genres?.length) || (!row.runtime_min && meta.runtime_min) || (!row.poster && meta.poster) || (meta.release_date && meta.release_date !== row.release_date))) {
     saveItem(meta, {}).catch(() => {});
   }
   if (row && type === "tv") {
@@ -345,6 +367,13 @@ function playStats(row) {
     ${split ? `<div class="ps-line">${split}</div>` : ""}
     ${bits.length ? `<div class="ps-line">${bits.join(" · ")}</div>` : ""}
   </div>`;
+}
+function relLine(meta, d, st) {
+  const nx = meta.media_type === "tv" && d?.next_episode_to_air;
+  if (nx?.air_date) return `<div class="rel-line">Next episode ${fmtDate(nx.air_date)} <span>S${nx.season_number} E${nx.episode_number}</span></div>`;
+  if (meta.release_date && meta.release_date > today()) return `<div class="rel-line">Out ${fmtDate(meta.release_date)}</div>`;
+  if (!meta.release_date && st === "wishlist") return `<div class="rel-line">Release date TBA</div>`;
+  return "";
 }
 function drawItem() {
   const { meta, extra, d } = current;
@@ -378,6 +407,7 @@ function drawItem() {
         <h1>${esc(meta.title)}${meta.year ? `<span class="yr num">${meta.year}</span>` : ""}</h1>
         ${facts.length ? `<div class="facts">${facts.map((f) => `<span>${esc(f)}</span>`).join("")}</div>` : ""}
         ${extra.cast?.length ? `<div class="facts"><span>With ${esc(extra.cast.join(", "))}</span></div>` : ""}
+        ${relLine(meta, d, st)}
         ${t === "game" ? playStats(row) : ""}
         ${extra.overview ? `<p class="overview">${esc(extra.overview.length > 700 ? extra.overview.slice(0, 700).replace(/\s+\S*$/, "") + "…" : extra.overview)}</p>` : ""}
       </div>
@@ -487,7 +517,7 @@ function renderLibrary() {
     year: (a, b) => (b.year || 0) - (a.year || 0),
   };
   list.sort(sorters[L.sort] || sorters.recent);
-  const statusLabels = L.type === "game" ? TYPES.game.status : L.type === "all" ? { want: "Watchlist / backlog", progress: "In progress", finished: "Finished", dropped: "Dropped" } : TYPES.movie.status;
+  const statusLabels = L.type === "game" ? TYPES.game.status : L.type === "all" ? { wishlist: "Wishlist", want: "Watchlist / backlog", progress: "In progress", finished: "Finished", dropped: "Dropped" } : TYPES.movie.status;
   view.innerHTML = `
     <div class="page-head"><div><h1>Library</h1><p class="sub num">${list.length.toLocaleString("en-GB")} titles</p></div>${typeTabs(L.type, "lib-type")}</div>
     <div class="action-line">
@@ -497,6 +527,113 @@ function renderLibrary() {
     </div>
     ${list.length ? `<div class="grid">${list.map((i) => card(i, { showStatus: true })).join("")}</div>` : `<div class="empty"><strong>Nothing matches these filters.</strong><span>Try another status or type, or search for something new.</span></div>`}`;
   $("#lib-sort").addEventListener("change", (e) => { L.sort = e.target.value; renderLibrary(); });
+}
+
+/* ---------- Calendar ---------- */
+const addDays = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); };
+async function inPool(list, n, fn) {
+  let i = 0;
+  await Promise.all(Array.from({ length: Math.min(n, list.length) }, async () => { while (i < list.length) { const x = list[i++]; try { await fn(x); } catch (e) { console.warn(e); } } }));
+}
+// Your releases: everything on your wishlist, plus the next episode of shows you're watching or queued.
+async function loadMine() {
+  const k = keys(); const ev = [];
+  const seen = new Set();
+  const targets = allItems().filter((i) => (i.status === "wishlist" || (i.media_type === "tv" && (i.status === "progress" || i.status === "want"))) && !seen.has(i.id) && seen.add(i.id));
+  await inPool(targets, 6, async (i) => {
+    let date = i.release_date || null, ep = "";
+    try {
+      if (i.source === "tmdb" && k.tmdb) {
+        const d = await tmdb(`/${i.media_type}/${i.ext_id}`, i.media_type === "movie" ? { append_to_response: "release_dates" } : {});
+        if (i.media_type === "movie") date = ukRelease(d);
+        else {
+          const nx = d.next_episode_to_air;
+          if (nx?.air_date) { date = nx.air_date; ep = `S${nx.season_number} E${nx.episode_number}${nx.name && !/^Episode \d+$/i.test(nx.name) ? " · " + nx.name : ""}`; }
+          else if (i.status === "wishlist") date = d.first_air_date || null;
+          else return; // watching, nothing scheduled
+        }
+      } else if (i.source === "rawg" && k.rawg) {
+        const g = await rawg(`/games/${i.ext_id}`); date = g.tba ? null : g.released || null;
+      } else if (i.status !== "wishlist") return;
+    } catch { if (i.status !== "wishlist") return; }
+    if (i.media_type !== "tv" && date && date !== i.release_date && !S.noRelease) saveItem(i, { release_date: date }).catch(() => {});
+    ev.push({ m: i, date, ep });
+  });
+  return ev;
+}
+// Everything coming up: popular films and new series over the next four months, games over the next year.
+async function loadAll() {
+  const k = keys(); const from = today(); const ev = []; const errs = [];
+  const add = (m, date) => { if (m.poster && date && date >= from) { searchCache.set(keyOf(m.media_type, m.source, m.ext_id), m); ev.push({ m, date, ep: "" }); } };
+  const jobs = [];
+  if (k.tmdb) {
+    jobs.push(Promise.all([1, 2, 3].map((page) => tmdb("/discover/movie", { "primary_release_date.gte": from, "primary_release_date.lte": addDays(120), sort_by: "popularity.desc", include_adult: "false", page })))
+      .then((ps) => ps.forEach((p) => p.results.forEach((r) => add(metaFromTmdb(r, "movie"), r.release_date)))));
+    jobs.push(Promise.all([1, 2].map((page) => tmdb("/discover/tv", { "first_air_date.gte": from, "first_air_date.lte": addDays(120), sort_by: "popularity.desc", include_adult: "false", page })))
+      .then((ps) => ps.forEach((p) => p.results.forEach((r) => add(metaFromTmdb(r, "tv"), r.first_air_date)))));
+  } else errs.push("TMDB");
+  if (k.rawg) {
+    jobs.push(rawg("/games", { dates: `${from},${addDays(365)}`, ordering: "-added", page_size: "40" })
+      .then((d) => d.results.forEach((g) => add(metaFromRawg(g), g.tba ? null : g.released))));
+  } else errs.push("RAWG");
+  const res = await Promise.allSettled(jobs);
+  res.filter((r) => r.status === "rejected").forEach((r) => errs.push(r.reason.message));
+  return { ev, errs };
+}
+function calRow(e) {
+  const m = e.m; const t = m.media_type;
+  const mine = S.items.get(keyOf(t, m.source, m.ext_id));
+  const dt = e.date ? new Date(e.date + "T00:00:00") : null;
+  const status = mine?.status ? `<span class="tag">${esc(TYPES[t].status[mine.status])}</span>` : "";
+  const released = mine?.status === "wishlist" && e.date && e.date <= today();
+  const action = released ? `<button class="btn" data-act="cal-move" data-id="${mine.id}">Move to ${TYPES[t].status.want}</button>`
+    : !mine?.status ? `<button class="icon-btn" data-act="cal-wish" data-key="${esc(keyOf(t, m.source, m.ext_id))}" aria-label="Add to wishlist" title="Add to wishlist">+</button>` : "";
+  return `<div class="entry ${mine?.status ? "mine" : ""}" data-type="${t}">
+    <div class="day">${dt ? `${dt.getDate()}<small>${dt.toLocaleDateString("en-GB", { weekday: "short" })}</small>` : `<small>TBA</small>`}</div>
+    <a class="mini" href="${itemHref(m)}">${m.poster ? `<img src="${esc(m.poster)}" alt="" loading="lazy">` : ""}</a>
+    <div class="entry-main"><a href="${itemHref(m)}">${esc(m.title)}</a> <span class="type-label" style="font-size:10px">${TYPES[t].label}</span> ${status}${e.ep ? `<p>${esc(e.ep)}</p>` : released ? `<p>Out ${fmtDate(e.date)}. Keep it wishlisted until you get it.</p>` : ""}</div>
+    <div>${action}</div>
+  </div>`;
+}
+function calMonths(list) {
+  const months = new Map();
+  list.forEach((e) => { const k = e.date.slice(0, 7); if (!months.has(k)) months.set(k, []); months.get(k).push(e); });
+  return [...months].map(([k, es]) => `<section class="month"><h2>${new Date(k + "-01T00:00:00").toLocaleDateString("en-GB", { month: "long", year: "numeric" })}</h2>${es.map(calRow).join("")}</section>`).join("");
+}
+async function renderCalendar(force = false) {
+  const C = CAL;
+  const head = `<div class="page-head"><div><h1>Calendar</h1><p class="sub">${C.view === "mine" ? "Your wishlist and the next episodes of shows you watch." : "Big films and new series for the next four months, games for the next year. Yours are highlighted."}</p></div>${typeTabs(C.type, "cal-type")}</div>
+    <div class="action-line"><div class="tabs"><button class="chip ${C.view === "mine" ? "on" : ""}" data-act="cal-view" data-v="mine">My releases</button><button class="chip ${C.view === "all" ? "on" : ""}" data-act="cal-view" data-v="all">All upcoming</button></div><button class="btn ghost" data-act="cal-refresh" style="margin-left:auto">Refresh</button></div>`;
+  if (force) { C.mine = null; C.all = null; }
+  const need = !C.mine || (C.view === "all" && !C.all);
+  if (need) {
+    view.innerHTML = head + `<p class="loading">Checking release dates…</p>`;
+    const v = C.view;
+    if (!C.mine) C.mine = await loadMine();
+    if (v === "all" && !C.all) C.all = await loadAll();
+    if (parseHash().parts[0] !== "calendar" || C.view !== v) return;
+  }
+  const byType = (e) => C.type === "all" || e.m.media_type === C.type;
+  const sort = (a, b) => a.date.localeCompare(b.date) || a.m.title.localeCompare(b.m.title);
+  const now = today();
+  let body = "";
+  if (C.view === "mine") {
+    const ev = C.mine.filter(byType);
+    const out = ev.filter((e) => e.date && e.date <= now && e.m.status === "wishlist").sort(sort);
+    const up = ev.filter((e) => e.date && e.date > now || (e.date === now && e.m.status !== "wishlist")).sort(sort);
+    const tba = ev.filter((e) => !e.date).sort((a, b) => a.m.title.localeCompare(b.m.title));
+    body = (out.length ? `<section class="month"><h2>Out now, still on your wishlist</h2>${out.map(calRow).join("")}</section>` : "")
+      + calMonths(up)
+      + (tba.length ? `<section class="month"><h2>Date to be announced</h2>${tba.map(calRow).join("")}</section>` : "");
+    if (!ev.length) body = `<div class="empty"><strong>Nothing on your calendar yet.</strong><span>Add upcoming films, series and games to your Wishlist (the + on a search result does this for anything not out yet), or browse All upcoming.</span><button class="btn" data-act="cal-view" data-v="all">Browse all upcoming</button></div>`;
+  } else {
+    const seen = new Set(); const merged = [];
+    [...C.mine.filter((e) => e.date && e.date >= now), ...C.all.ev].forEach((e) => { const k = keyOf(e.m.media_type, e.m.source, e.m.ext_id); if (!seen.has(k)) { seen.add(k); merged.push(e); } });
+    const ev = merged.filter(byType).sort(sort);
+    body = (C.all.errs.length ? `<div class="empty"><strong>Some sources didn't load.</strong><span>${esc(C.all.errs.map((x) => x === "TMDB" || x === "RAWG" ? `${x} key missing (add it in Settings)` : x).join(" · "))}</span></div>` : "")
+      + (ev.length ? calMonths(ev) : `<div class="empty"><strong>No upcoming releases found.</strong></div>`);
+  }
+  view.innerHTML = head + `<div style="display:grid;gap:18px">${body}</div>`;
 }
 
 /* ---------- Diary ---------- */
@@ -839,9 +976,23 @@ document.addEventListener("click", async (e) => {
       case "lib-type": S.lib.type = b.dataset.v; store.set("m.libType", S.lib.type); renderLibrary(); break;
       case "lib-status": S.lib.status = b.dataset.v; renderLibrary(); break;
       case "lib-fav": S.lib.fav = !S.lib.fav; renderLibrary(); break;
+      case "cal-view": CAL.view = b.dataset.v; store.set("m.calView", CAL.view); await renderCalendar(); break;
+      case "cal-type": CAL.type = b.dataset.v; await renderCalendar(); break;
+      case "cal-refresh": await renderCalendar(true); break;
+      case "cal-wish": {
+        const m = searchCache.get(b.dataset.key); if (!m) break;
+        await saveItem(m, { status: "wishlist" }); toast("Added to Wishlist");
+        CAL.mine = await loadMine(); await renderCalendar(); break;
+      }
+      case "cal-move": {
+        const row = S.byId.get(b.dataset.id); if (!row) break;
+        await saveItem(row, { status: "want" }); toast(`Moved to ${TYPES[row.media_type].status.want}`);
+        CAL.mine = await loadMine(); await renderCalendar(); break;
+      }
       case "quick-add": {
         const m = searchCache.get(b.dataset.key); if (!m) break;
-        await saveItem(m, { status: "want" }); toast(`Added to ${TYPES[m.media_type].status.want}`);
+        const st = addStatus(m);
+        await saveItem(m, { status: st }); toast(`Added to ${TYPES[m.media_type].status[st]}`);
         b.remove(); break;
       }
       case "set-status": {

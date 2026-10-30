@@ -15,7 +15,7 @@ create table if not exists public.items (
   poster text,
   genres text[] not null default '{}',
   runtime_min int,
-  status text check (status in ('want', 'progress', 'finished', 'dropped')),
+  status text check (status in ('wishlist', 'want', 'progress', 'finished', 'dropped')),
   rating numeric(2,1) check (rating between 0.5 and 5),
   favourite boolean not null default false,
   review text,
@@ -26,6 +26,7 @@ create table if not exists public.items (
   started_on date,
   finished_on date,
   last_played date,
+  release_date date,                 -- films/games: release (UK cinema date for films); used by the calendar
   import_names text[] not null default '{}',
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),

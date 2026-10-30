@@ -259,3 +259,10 @@ textarea.input { min-height: 96px; resize: vertical; }
 .ps-hours { font-family: "Bricolage Grotesque", sans-serif; font-weight: 800; font-size: clamp(30px, 6vw, 44px); line-height: 1; color: var(--game); }
 .ps-hours span { font-family: "Schibsted Grotesk", sans-serif; font-weight: 500; font-size: 14px; color: var(--muted); margin-left: 8px; }
 .ps-line { color: var(--muted); font-size: 14px; }
+
+/* Wishlist and calendar */
+.rel-line { font-weight: 600; color: var(--accent, var(--fg)); }
+.rel-line span { color: var(--muted); font-weight: 500; margin-left: 6px; }
+.entry.mine { background: color-mix(in srgb, var(--accent, var(--fg)) 9%, transparent); border-radius: 6px; }
+.entry .day small:only-child { font-size: 11px; }
+.entry .btn { padding: 6px 10px; font-size: 13px; white-space: nowrap; }
