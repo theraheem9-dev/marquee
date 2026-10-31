@@ -754,6 +754,11 @@ function renderSettings() {
       </div>
     </div>
     <div style="display:grid;gap:20px;min-width:0">
+      <div class="panel"><h2>Sign-in password</h2>
+        <p class="hint">Set a password to sign in on your phone's home-screen app, where the email link can't reach.</p>
+        <div class="field"><label for="pw-new">New password (8+ characters)</label><input id="pw-new" class="input" type="password" autocomplete="new-password" minlength="8"></div>
+        <div><button class="btn primary" data-act="set-password">Save password</button></div>
+      </div>
       <div class="panel"><h2>Back up your data</h2>
         <p class="hint">Download everything (library, diary, episodes, lists) as one JSON file.</p>
         <div><button class="btn" data-act="export">Download backup</button></div>
@@ -1063,6 +1068,13 @@ document.addEventListener("click", async (e) => {
       }
       case "run-import": b.disabled = true; await runImport(); b.disabled = false; break;
       case "export": await exportData(); break;
+      case "set-password": {
+        const pw = $("#pw-new").value;
+        if (pw.length < 8) { toast("Use at least 8 characters.", true); break; }
+        const { error } = await S.sb.auth.updateUser({ password: pw });
+        if (error) toast(error.message, true); else { $("#pw-new").value = ""; toast("Password saved. Use it to sign in on your phone."); }
+        break;
+      }
       case "sign-out": await S.sb.auth.signOut(); location.hash = ""; location.reload(); break;
     }
   } catch (err) { console.error(err); toast(err.message || "Something went wrong", true); }
@@ -1080,29 +1092,32 @@ $("#top-search").addEventListener("submit", (e) => {
 window.addEventListener("hashchange", route);
 
 /* ---------- auth + boot ---------- */
-function renderAuth(sentTo = "") {
+function renderAuth(sent = false) {
   document.body.classList.add("signed-out");
   $(".top").hidden = true;
   view.innerHTML = `<div class="auth">
     <span class="brand-bars" aria-hidden="true"><i></i><i></i><i></i></span>
     <h1>Marquee</h1>
     <p class="sub">Your films, series and games in one place.</p>
-    ${sentTo ? `<form id="code-form" class="panel"><h2>Check your email</h2><p class="hint">Type the code from the email here. (On a computer you can tap the link instead.)</p><div class="field"><label for="a-code">Code</label><input id="a-code" class="input" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6,10}" maxlength="10" required></div><button class="btn primary">Sign in</button><p class="hint"><a href="#" id="a-back">Use a different email or resend</a></p></form>`
-      : `<form id="auth-form" class="panel"><div class="field"><label for="a-email">Email</label><input id="a-email" class="input" type="email" required autocomplete="email"></div><button class="btn primary">Email me a sign-in code</button><p class="hint">No password needed.</p></form>`}
+    ${sent ? `<div class="panel"><h2>Check your email</h2><p class="hint">We sent a sign-in link. Open it on this device to continue.</p><p class="hint"><a href="#" id="a-back">Back</a></p></div>`
+      : `<form id="auth-form" class="panel"><div class="field"><label for="a-email">Email</label><input id="a-email" class="input" type="email" required autocomplete="email"></div><div class="field"><label for="a-pw">Password</label><input id="a-pw" class="input" type="password" autocomplete="current-password"></div><button class="btn primary" name="pw">Sign in</button><button class="btn" type="button" id="a-link">Email me a sign-in link instead</button><p class="hint">No password yet? Use the email link on your computer, then set one in Settings.</p></form>`}
   </div>`;
+  $("#a-back")?.addEventListener("click", (e) => { e.preventDefault(); renderAuth(); });
   $("#auth-form")?.addEventListener("submit", async (e) => {
     e.preventDefault();
-    const btn = e.target.querySelector("button"); btn.disabled = true;
-    const email = $("#a-email").value.trim();
-    const { error } = await S.sb.auth.signInWithOtp({ email, options: { emailRedirectTo: location.origin + location.pathname } });
-    if (error) { toast(error.message, true); btn.disabled = false; } else renderAuth(email);
+    const btn = e.target.querySelector("button[name=pw]");
+    const password = $("#a-pw").value;
+    if (!password) { toast("Enter your password, or use the email link.", true); return; }
+    btn.disabled = true;
+    const { error } = await S.sb.auth.signInWithPassword({ email: $("#a-email").value.trim(), password });
+    if (error) { toast("Wrong email or password.", true); btn.disabled = false; }
   });
-  $("#a-back")?.addEventListener("click", (e) => { e.preventDefault(); renderAuth(); });
-  $("#code-form")?.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const btn = e.target.querySelector("button"); btn.disabled = true;
-    const { error } = await S.sb.auth.verifyOtp({ email: sentTo, token: $("#a-code").value.trim(), type: "email" });
-    if (error) { toast("That code didn't work. Check it, or request a new one.", true); btn.disabled = false; }
+  $("#a-link")?.addEventListener("click", async (e) => {
+    const email = $("#a-email").value.trim();
+    if (!$("#a-email").checkValidity()) { toast("Enter your email first.", true); return; }
+    e.target.disabled = true;
+    const { error } = await S.sb.auth.signInWithOtp({ email, options: { emailRedirectTo: location.origin + location.pathname } });
+    if (error) { toast(error.message, true); e.target.disabled = false; } else renderAuth(true);
   });
 }
 async function onSignedIn(user) {

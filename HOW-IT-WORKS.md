@@ -6,7 +6,7 @@ A plain-English tour for steering the build without reading every line.
 
 Marquee is a private website for tracking the films, TV series and games you watch and play, a bit like Letterboxd plus a game log. For each title you can set a status (Wishlist, Watchlist/Backlog, Watching/Playing, Watched/Played, Dropped), give it a star rating, write a review, favourite it, log the dates you watched or finished it, tick off TV episodes, record game hours and trophies, make your own lists, and pin a "top four" per type. The Stats page totals it all up. The Calendar page shows release dates: "My releases" for your wishlist and the next episodes of shows you watch, and "All upcoming" for popular films, new series and games coming out, with yours highlighted. You can import your PlayStation and Steam play history from a CSV file.
 
-Only you can see your data: you sign in with an emailed code (or the link in the same email, on a computer), and the database only returns rows that belong to the signed-in user.
+Only you can see your data: you sign in with your password, or with an emailed link (set the password in Settings after your first link sign-in), and the database only returns rows that belong to the signed-in user.
 
 ## The pieces
 
@@ -71,7 +71,7 @@ Your own records (statuses, ratings, hours) live only in Supabase. The posters, 
 1. **Database:** in Supabase's SQL Editor, run `schema.sql` once for a new project, or the files in `migrations/` for an existing one.
 2. **Connect:** put the Supabase project URL and publishable key in `config.js`.
 3. **Serve:** any static host works (GitHub Pages, Netlify, Cloudflare Pages). To try it on your own computer, run `python -m http.server` in the folder and open `http://localhost:8000`. Opening `index.html` by double-click won't work: the browser blocks the app's files when there's no server.
-4. **Sign in** with the code from your email (the Supabase "Magic Link" email template must include `{{ .Token }}`), then paste your free TMDB and RAWG keys in Settings.
+4. **Sign in** with the email link, set a password in Settings (phone home-screen apps can't receive the link), then paste your free TMDB and RAWG keys in Settings.
 5. **Tests:** `npm test` (needs Node 20 or later).
 
 ## Where to change common things
