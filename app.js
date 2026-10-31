@@ -39,7 +39,7 @@ const S = {
   byId: new Map(),       // id -> row
   diary: [], lists: [], listItems: [], showcase: [],
   homeType: store.get("m.homeType") || "all",
-  lib: { type: store.get("m.libType") || "all", status: "all", fav: false, sort: "recent" },
+  lib: { type: store.get("m.libType") || "all", status: "all", fav: false, sort: "recent", plat: "all" },
 };
 const CAL = { view: store.get("m.calView") || "mine", type: "all", mine: null, all: null };
 const keyOf = (t, s, e) => `${t}:${s}:${e}`;
@@ -509,7 +509,9 @@ function renderLibrary() {
   const { q } = parseHash();
   if (q.get("status")) { S.lib.status = q.get("status"); history.replaceState(null, "", "#/library"); }
   const L = S.lib;
-  let list = allItems().filter((i) => (L.type === "all" || i.media_type === L.type) && (L.status === "all" || i.status === L.status) && (!L.fav || i.favourite));
+  const plats = L.type === "game" || L.type === "all" ? [...new Set(allItems().flatMap((i) => i.platforms || []))].sort() : [];
+  if (!plats.includes(L.plat)) L.plat = "all";
+  let list = allItems().filter((i) => (L.type === "all" || i.media_type === L.type) && (L.status === "all" || i.status === L.status) && (!L.fav || i.favourite) && (L.plat === "all" || (i.platforms || []).includes(L.plat)));
   const sorters = {
     recent: (a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""),
     title: (a, b) => a.title.localeCompare(b.title),
@@ -524,10 +526,12 @@ function renderLibrary() {
     <div class="action-line">
       <div class="tabs">${[["all", "Any status"], ...STATUS_ORDER.map((s) => [s, statusLabels[s]])].map(([v, l]) => `<button class="chip ${L.status === v ? "on" : ""}" data-act="lib-status" data-v="${v}">${l}</button>`).join("")}
         <button class="chip ${L.fav ? "on" : ""}" data-act="lib-fav">♥ Favourites</button></div>
-      <div class="field" style="margin-left:auto"><label for="lib-sort" class="eyebrow">Sort</label><select id="lib-sort" class="input">${[["recent", "Recently updated"], ["title", "Title A–Z"], ["rating", "Your rating"], ["year", "Release year"], ["hours", "Hours played"]].map(([v, l]) => `<option value="${v}" ${L.sort === v ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+      ${plats.length ? `<div class="field" style="margin-left:auto"><label for="lib-plat" class="eyebrow">Platform</label><select id="lib-plat" class="input"><option value="all">All platforms</option>${plats.map((p) => `<option value="${esc(p)}" ${L.plat === p ? "selected" : ""}>${esc(p)}</option>`).join("")}</select></div>` : ""}
+      <div class="field" style="${plats.length ? "" : "margin-left:auto"}"><label for="lib-sort" class="eyebrow">Sort</label><select id="lib-sort" class="input">${[["recent", "Recently updated"], ["title", "Title A–Z"], ["rating", "Your rating"], ["year", "Release year"], ["hours", "Hours played"]].map(([v, l]) => `<option value="${v}" ${L.sort === v ? "selected" : ""}>${l}</option>`).join("")}</select></div>
     </div>
     ${list.length ? `<div class="grid">${list.map((i) => card(i, { showStatus: true })).join("")}</div>` : `<div class="empty"><strong>Nothing matches these filters.</strong><span>Try another status or type, or search for something new.</span></div>`}`;
   $("#lib-sort").addEventListener("change", (e) => { L.sort = e.target.value; renderLibrary(); });
+  $("#lib-plat")?.addEventListener("change", (e) => { L.plat = e.target.value; renderLibrary(); });
 }
 
 /* ---------- Calendar ---------- */
