@@ -153,7 +153,57 @@ async function saveItem(meta, patch = {}) {
   }
   if (res.error) { toast(res.error.message, true); throw res.error; }
   putItem(res.data);
+  if (res.data.media_type === "game") queueCover(res.data);
   return res.data;
+}
+
+/* ---------- box art (IGDB, via the "covers" Supabase function) ---------- */
+const hasBoxArt = (i) => /images\.igdb\.com/.test(i.poster || "");
+const coverQ = { pending: new Map(), tried: new Set(), timer: null, off: false };
+function queueCover(row) {
+  if (coverQ.off || hasBoxArt(row) || coverQ.tried.has(row.id)) return;
+  coverQ.pending.set(row.id, row);
+  clearTimeout(coverQ.timer); coverQ.timer = setTimeout(flushCovers, 800);
+}
+async function flushCovers() {
+  const batch = [...coverQ.pending.values()].slice(0, 10);
+  if (!batch.length) return;
+  batch.forEach((r) => { coverQ.pending.delete(r.id); coverQ.tried.add(r.id); });
+  await fetchCovers(batch).catch(() => {});
+  if (coverQ.pending.size) coverQ.timer = setTimeout(flushCovers, 300);
+}
+// Returns how many covers were found. Throws "NO_KEYS" if Twitch keys aren't set in Supabase yet.
+async function fetchCovers(rows) {
+  const { data, error } = await S.sb.functions.invoke("covers", { body: { games: rows.map((r) => ({ id: r.id, title: r.title, year: r.year })) } });
+  if (error) {
+    const body = await error.context?.json?.().catch(() => null);
+    if (body?.error === "NO_KEYS" || error.context?.status === 404) { coverQ.off = true; throw new Error("NO_KEYS"); }
+    throw new Error(body?.error || error.message);
+  }
+  let found = 0;
+  for (const r of rows) {
+    const url = data.covers?.[r.id];
+    if (!url) continue;
+    const { data: upd, error: e } = await S.sb.from("items").update({ poster: url }).eq("id", r.id).select().single();
+    if (!e) { putItem(upd); found++; }
+  }
+  return found;
+}
+async function fetchAllCovers(btn) {
+  const todo = allItems().filter((i) => i.media_type === "game" && !hasBoxArt(i));
+  if (!todo.length) return toast("Every game already has box art");
+  btn.disabled = true; let found = 0;
+  try {
+    for (let n = 0; n < todo.length; n += 10) {
+      btn.textContent = `Working… ${Math.min(n + 10, todo.length)} of ${todo.length}`;
+      found += await fetchCovers(todo.slice(n, n + 10));
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    toast(`Box art found for ${found} of ${todo.length} games`);
+  } catch (e) {
+    toast(e.message === "NO_KEYS" ? "Box art isn't set up yet: add your Twitch keys in Supabase first" : e.message, true);
+  }
+  btn.disabled = false; btn.textContent = "Get box art";
 }
 async function deleteItem(row) {
   const { error } = await S.sb.from("items").delete().eq("id", row.id);
@@ -172,11 +222,17 @@ function starsText(v) {
   const full = Math.floor(v), half = v % 1 >= 0.5;
   return "★".repeat(full) + (half ? "½" : "");
 }
+// Games: show the whole image (box art is a different shape to the tile), with a blurred copy filling the gaps.
+function posterImg(m, lazy = true) {
+  if (!m.poster) return `<div class="fallback">${esc(m.title)}</div>`;
+  const l = lazy ? ` loading="lazy"` : "";
+  return m.media_type === "game" ? `<img class="bg" src="${esc(m.poster)}" alt="" aria-hidden="true"${l}><img class="fit" src="${esc(m.poster)}" alt=""${l}>` : `<img src="${esc(m.poster)}" alt=""${l}>`;
+}
 function itemHref(m) { return `#/item/${m.media_type}/${m.source}/${encodeURIComponent(m.ext_id)}`; }
 function card(m, opts = {}) {
   const mine = S.items.get(keyOf(m.media_type, m.source, m.ext_id)) || (m.id ? m : null);
   const t = m.media_type;
-  const img = m.poster ? `<img src="${esc(m.poster)}" alt="" loading="lazy">` : `<div class="fallback">${esc(m.title)}</div>`;
+  const img = posterImg(m);
   const badges = [];
   if (mine?.favourite) badges.push(`<span class="badge fav" title="Favourite">♥</span>`);
   if (t === "game" && mine?.hours) badges.push(`<span class="badge num">${fmtHours(mine.hours)}</span>`);
@@ -402,7 +458,7 @@ function drawItem() {
   <div class="detail" data-type="${t}">
     ${extra.backdrop ? `<div class="backdrop" aria-hidden="true"><img src="${esc(t === "game" ? rawgImg(extra.backdrop, 1280) : extra.backdrop)}" alt=""></div>` : ""}
     <div class="hero">
-      <div class="poster">${meta.poster ? `<img src="${esc(meta.poster)}" alt="">` : `<div class="fallback">${esc(meta.title)}</div>`}<span class="type-strip"></span></div>
+      <div class="poster">${posterImg(meta, false)}<span class="type-strip"></span></div>
       <div class="hero-text">
         <span class="type-label">${TYPES[t].label}</span>
         <h1>${esc(meta.title)}${meta.year ? `<span class="yr num">${meta.year}</span>` : ""}</h1>
@@ -764,6 +820,10 @@ function renderSettings() {
         <div class="field"><label for="pw-new">New password (8+ characters)</label><input id="pw-new" class="input" type="password" autocomplete="new-password" minlength="8"></div>
         <div><button class="btn primary" data-act="set-password">Save password</button></div>
       </div>
+      <div class="panel"><h2>Game box art</h2>
+        <p class="hint">Swap game pictures for the official cover art from IGDB. New games get it automatically. Games with no match keep their current picture.</p>
+        <div><button class="btn" data-act="get-covers">Get box art</button></div>
+      </div>
       <div class="panel"><h2>Back up your data</h2>
         <p class="hint">Download everything (library, diary, episodes, lists) as one JSON file.</p>
         <div><button class="btn" data-act="export">Download backup</button></div>
@@ -1073,6 +1133,7 @@ document.addEventListener("click", async (e) => {
       }
       case "run-import": b.disabled = true; await runImport(); b.disabled = false; break;
       case "export": await exportData(); break;
+      case "get-covers": await fetchAllCovers(b); break;
       case "set-password": {
         const pw = $("#pw-new").value;
         if (pw.length < 8) { toast("Use at least 8 characters.", true); break; }
