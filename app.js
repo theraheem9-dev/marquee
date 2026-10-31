@@ -47,10 +47,11 @@ const putItem = (row) => { S.items.set(keyOf(row.media_type, row.source, row.ext
 const dropItem = (row) => { S.items.delete(keyOf(row.media_type, row.source, row.ext_id)); S.byId.delete(row.id); };
 
 /* ---------- external APIs ---------- */
+const cleanKey = (v) => (v || "").replace(/^\s*bearer\s+/i, "").replace(/[\s"'\u200B-\u200D\uFEFF]/g, "");
 const keys = () => ({ tmdb: store.get("m.tmdb"), rawg: store.get("m.rawg") });
 const TMDB_IMG = "https://image.tmdb.org/t/p/";
 async function tmdb(path, params = {}) {
-  const k = keys().tmdb; if (!k) throw new Error("NO_TMDB");
+  const k = cleanKey(keys().tmdb); if (!k) throw new Error("NO_TMDB");
   const url = new URL("https://api.themoviedb.org/3" + path);
   const headers = { accept: "application/json" };
   if (k.startsWith("eyJ")) headers.Authorization = "Bearer " + k; else url.searchParams.set("api_key", k);
@@ -61,7 +62,7 @@ async function tmdb(path, params = {}) {
   return r.json();
 }
 async function rawg(path, params = {}) {
-  const k = keys().rawg; if (!k) throw new Error("NO_RAWG");
+  const k = cleanKey(keys().rawg); if (!k) throw new Error("NO_RAWG");
   const url = new URL("https://api.rawg.io/api" + path);
   url.searchParams.set("key", k);
   for (const [a, b] of Object.entries(params)) url.searchParams.set(a, b);
@@ -1059,9 +1060,9 @@ document.addEventListener("click", async (e) => {
         const { error } = await S.sb.from("list_items").delete().eq("list_id", b.dataset.list).eq("item_id", b.dataset.item); if (error) throw error;
         S.listItems = S.listItems.filter((x) => !(x.list_id === b.dataset.list && x.item_id === b.dataset.item)); renderList(b.dataset.list); break;
       }
-      case "save-keys": store.set("m.tmdb", $("#k-tmdb").value.trim()); store.set("m.rawg", $("#k-rawg").value.trim()); toast("Keys saved on this device"); break;
+      case "save-keys": store.set("m.tmdb", cleanKey($("#k-tmdb").value)); store.set("m.rawg", cleanKey($("#k-rawg").value)); toast("Keys saved on this device"); break;
       case "test-keys": {
-        store.set("m.tmdb", $("#k-tmdb").value.trim()); store.set("m.rawg", $("#k-rawg").value.trim());
+        store.set("m.tmdb", cleanKey($("#k-tmdb").value)); store.set("m.rawg", cleanKey($("#k-rawg").value));
         const r = await Promise.allSettled([tmdb("/configuration"), rawg("/games", { page_size: "1" })]);
         const msg = (x, n) => x.status === "fulfilled" ? `${n} works` : `${n}: ${x.reason.message.startsWith("NO_") ? "missing" : x.reason.message}`;
         toast(`${msg(r[0], "TMDB")} · ${msg(r[1], "RAWG")}`, r.some((x) => x.status === "rejected")); break;
