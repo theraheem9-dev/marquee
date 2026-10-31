@@ -1080,21 +1080,29 @@ $("#top-search").addEventListener("submit", (e) => {
 window.addEventListener("hashchange", route);
 
 /* ---------- auth + boot ---------- */
-function renderAuth(sent = false) {
+function renderAuth(sentTo = "") {
   document.body.classList.add("signed-out");
   $(".top").hidden = true;
   view.innerHTML = `<div class="auth">
     <span class="brand-bars" aria-hidden="true"><i></i><i></i><i></i></span>
     <h1>Marquee</h1>
     <p class="sub">Your films, series and games in one place.</p>
-    ${sent ? `<div class="panel"><h2>Check your email</h2><p class="hint">We sent a sign-in link. Open it on this device to continue.</p></div>`
-      : `<form id="auth-form" class="panel"><div class="field"><label for="a-email">Email</label><input id="a-email" class="input" type="email" required autocomplete="email"></div><button class="btn primary">Email me a sign-in link</button><p class="hint">No password needed.</p></form>`}
+    ${sentTo ? `<form id="code-form" class="panel"><h2>Check your email</h2><p class="hint">Type the code from the email here. (On a computer you can tap the link instead.)</p><div class="field"><label for="a-code">Code</label><input id="a-code" class="input" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6,10}" maxlength="10" required></div><button class="btn primary">Sign in</button><p class="hint"><a href="#" id="a-back">Use a different email or resend</a></p></form>`
+      : `<form id="auth-form" class="panel"><div class="field"><label for="a-email">Email</label><input id="a-email" class="input" type="email" required autocomplete="email"></div><button class="btn primary">Email me a sign-in code</button><p class="hint">No password needed.</p></form>`}
   </div>`;
   $("#auth-form")?.addEventListener("submit", async (e) => {
     e.preventDefault();
     const btn = e.target.querySelector("button"); btn.disabled = true;
-    const { error } = await S.sb.auth.signInWithOtp({ email: $("#a-email").value.trim(), options: { emailRedirectTo: location.origin + location.pathname } });
-    if (error) { toast(error.message, true); btn.disabled = false; } else renderAuth(true);
+    const email = $("#a-email").value.trim();
+    const { error } = await S.sb.auth.signInWithOtp({ email, options: { emailRedirectTo: location.origin + location.pathname } });
+    if (error) { toast(error.message, true); btn.disabled = false; } else renderAuth(email);
+  });
+  $("#a-back")?.addEventListener("click", (e) => { e.preventDefault(); renderAuth(); });
+  $("#code-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const btn = e.target.querySelector("button"); btn.disabled = true;
+    const { error } = await S.sb.auth.verifyOtp({ email: sentTo, token: $("#a-code").value.trim(), type: "email" });
+    if (error) { toast("That code didn't work. Check it, or request a new one.", true); btn.disabled = false; }
   });
 }
 async function onSignedIn(user) {
