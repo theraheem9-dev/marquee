@@ -37,9 +37,9 @@ const S = {
   sb: null, user: null,
   items: new Map(),      // key `${type}:${source}:${ext}` -> row
   byId: new Map(),       // id -> row
-  diary: [], lists: [], listItems: [], showcase: [],
+  diary: [], lists: [], listItems: [], showcase: [], cols: [], colItems: [],
   homeType: store.get("m.homeType") || "all",
-  lib: { type: store.get("m.libType") || "all", status: "all", fav: false, sort: "recent", plat: "all" },
+  lib: { type: store.get("m.libType") || "all", status: "all", fav: false, sort: "recent", plat: "all", col: "all" },
 };
 const CAL = { view: store.get("m.calView") || "mine", type: "all", mine: null, all: null };
 const keyOf = (t, s, e) => `${t}:${s}:${e}`;
@@ -120,6 +120,11 @@ async function loadEverything() {
   ]);
   S.items.clear(); S.byId.clear(); items.forEach(putItem);
   S.diary = diary; S.lists = lists; S.listItems = listItems; S.showcase = showcase;
+  // collections arrived with migrations/003_collections.sql; the rest of the app works without them
+  try {
+    [S.cols, S.colItems] = await Promise.all([fetchAll("collections", "created_at"), fetchAll("collection_items")]);
+    S.noCols = false;
+  } catch (e) { console.warn("collections", e); S.cols = []; S.colItems = []; S.noCols = true; }
 }
 const META_FIELDS = ["media_type", "source", "ext_id", "title", "year", "poster", "genres", "runtime_min", "release_date"];
 async function saveItem(meta, patch = {}) {
@@ -275,7 +280,7 @@ async function route() {
   if (!S.user) return;
   const { parts, q } = parseHash();
   const name = parts[0] || "home";
-  document.querySelectorAll("#nav a").forEach((a) => a.classList.toggle("on", a.dataset.nav === name));
+  document.querySelectorAll("#nav a").forEach((a) => a.classList.toggle("on", a.dataset.nav === name || a.dataset.nav === name + "s"));
   window.scrollTo(0, 0);
   try {
     if (name === "home") renderHome();
@@ -286,6 +291,8 @@ async function route() {
     else if (name === "lists") renderLists();
     else if (name === "calendar") await renderCalendar();
     else if (name === "list") renderList(parts[1]);
+    else if (name === "collections") renderCollections();
+    else if (name === "collection") await renderCollection(parts[1]);
     else if (name === "stats") renderStats();
     else if (name === "settings") renderSettings();
     else renderHome();
@@ -439,6 +446,9 @@ function drawItem() {
   const st = row?.status;
   const facts = (extra.facts || []).filter(Boolean);
   const hist = row ? S.diary.filter((x) => x.item_id === row.id) : [];
+  const inCols = S.noCols ? [] : colsWith(meta);
+  const franchise = t === "movie" && d?.belongs_to_collection && !S.noCols ? d.belongs_to_collection : null;
+  const franCol = franchise && S.cols.find((c) => c.kind === "tmdb_collection" && c.ref === String(franchise.id));
   const inLists = row ? S.listItems.filter((l) => l.item_id === row.id).map((l) => S.lists.find((x) => x.id === l.list_id)).filter(Boolean) : [];
   const gamePanel = t === "game" ? `
     <div class="panel"><h2>Playtime</h2>
@@ -477,8 +487,11 @@ function drawItem() {
         ${starsWidget(row?.rating)}
         <button class="btn" data-act="log">${t === "game" ? "Log playthrough" : "Log watch"}</button>
         <button class="btn" data-act="add-to-list">Add to list</button>
+        ${S.noCols ? "" : `<button class="btn" data-act="add-to-col">Add to collection</button>`}
         ${row ? `<button class="btn ghost" data-act="showcase">Pin to top four</button>` : ""}
       </div>
+      ${inCols.length ? `<p class="hint">In collections: ${inCols.map((c) => `<a class="link" href="#/collection/${c.id}">${esc(c.name)}</a>`).join(", ")}</p>` : ""}
+      ${franchise && !franCol ? `<p class="hint">Part of ${esc(franchise.name)}. <button class="link-btn" data-act="col-follow-tmdb" data-ref="${franchise.id}" data-name="${esc(franchise.name)}" data-poster="${esc(franchise.poster_path || "")}">Group it in Collections</button></p>` : ""}
       ${inLists.length ? `<p class="hint">In lists: ${inLists.map((l) => `<a class="link" href="#/list/${l.id}">${esc(l.name)}</a>`).join(", ")}</p>` : ""}
     </section>
 
@@ -568,6 +581,8 @@ function renderLibrary() {
   const plats = L.type === "game" || L.type === "all" ? [...new Set(allItems().flatMap((i) => i.platforms || []))].sort() : [];
   if (!plats.includes(L.plat)) L.plat = "all";
   let list = allItems().filter((i) => (L.type === "all" || i.media_type === L.type) && (L.status === "all" || i.status === L.status) && (!L.fav || i.favourite) && (L.plat === "all" || (i.platforms || []).includes(L.plat)));
+  if (L.col !== "all" && !colOf(L.col)) L.col = "all";
+  if (L.col !== "all") { const ks = memberKeys(L.col); list = list.filter((i) => ks.has(keyOf(i.media_type, i.source, i.ext_id))); }
   const sorters = {
     recent: (a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""),
     title: (a, b) => a.title.localeCompare(b.title),
@@ -583,11 +598,13 @@ function renderLibrary() {
       <div class="tabs">${[["all", "Any status"], ...STATUS_ORDER.map((s) => [s, statusLabels[s]])].map(([v, l]) => `<button class="chip ${L.status === v ? "on" : ""}" data-act="lib-status" data-v="${v}">${l}</button>`).join("")}
         <button class="chip ${L.fav ? "on" : ""}" data-act="lib-fav">♥ Favourites</button></div>
       ${plats.length ? `<div class="field" style="margin-left:auto"><label for="lib-plat" class="eyebrow">Platform</label><select id="lib-plat" class="input"><option value="all">All platforms</option>${plats.map((p) => `<option value="${esc(p)}" ${L.plat === p ? "selected" : ""}>${esc(p)}</option>`).join("")}</select></div>` : ""}
-      <div class="field" style="${plats.length ? "" : "margin-left:auto"}"><label for="lib-sort" class="eyebrow">Sort</label><select id="lib-sort" class="input">${[["recent", "Recently updated"], ["title", "Title A–Z"], ["rating", "Your rating"], ["year", "Release year"], ["hours", "Hours played"]].map(([v, l]) => `<option value="${v}" ${L.sort === v ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+      ${S.cols.length ? `<div class="field" style="${plats.length ? "" : "margin-left:auto"}"><label for="lib-col" class="eyebrow">Collection</label><select id="lib-col" class="input"><option value="all">Any collection</option>${S.cols.map((c) => `<option value="${c.id}" ${L.col === c.id ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select></div>` : ""}
+      <div class="field" style="${plats.length || S.cols.length ? "" : "margin-left:auto"}"><label for="lib-sort" class="eyebrow">Sort</label><select id="lib-sort" class="input">${[["recent", "Recently updated"], ["title", "Title A–Z"], ["rating", "Your rating"], ["year", "Release year"], ["hours", "Hours played"]].map(([v, l]) => `<option value="${v}" ${L.sort === v ? "selected" : ""}>${l}</option>`).join("")}</select></div>
     </div>
     ${list.length ? `<div class="grid">${list.map((i) => card(i, { showStatus: true })).join("")}</div>` : `<div class="empty"><strong>Nothing matches these filters.</strong><span>Try another status or type, or search for something new.</span></div>`}`;
   $("#lib-sort").addEventListener("change", (e) => { L.sort = e.target.value; renderLibrary(); });
   $("#lib-plat")?.addEventListener("change", (e) => { L.plat = e.target.value; renderLibrary(); });
+  $("#lib-col")?.addEventListener("change", (e) => { L.col = e.target.value; renderLibrary(); });
 }
 
 /* ---------- Calendar ---------- */
@@ -728,6 +745,161 @@ function renderList(id) {
   view.innerHTML = `<div class="page-head"><div><a class="link" href="#/lists">← Lists</a><h1>${esc(l.name)}</h1>${l.description ? `<p class="sub">${esc(l.description)}</p>` : ""}</div><div style="display:flex;gap:8px"><button class="btn" data-act="edit-list" data-id="${id}">Edit</button><button class="btn danger" data-act="del-list" data-id="${id}">Delete</button></div></div>
     ${its.length ? `<div>${its.map((x, n) => { const i = S.byId.get(x.item_id); if (!i) return ""; return `<div class="list-row" data-type="${i.media_type}"><span class="rank num">${n + 1}</span><a class="mini entry" style="display:block;padding:0;border:0" href="${itemHref(i)}"><div class="mini">${i.poster ? `<img src="${esc(i.poster)}" alt="">` : ""}</div></a><div class="entry-main"><a href="${itemHref(i)}" style="text-decoration:none;font-weight:600">${esc(i.title)}</a><p class="hint">${TYPES[i.media_type].label}${i.year ? " · " + i.year : ""} ${i.rating ? `<span class="stars-sm">${starsText(i.rating)}</span>` : ""}</p></div><div style="display:flex;gap:4px"><button class="icon-btn" data-act="list-move" data-list="${id}" data-item="${i.id}" data-dir="-1" aria-label="Move up" ${n === 0 ? "disabled" : ""}>↑</button><button class="icon-btn" data-act="list-move" data-list="${id}" data-item="${i.id}" data-dir="1" aria-label="Move down" ${n === its.length - 1 ? "disabled" : ""}>↓</button><button class="icon-btn" data-act="list-remove" data-list="${id}" data-item="${i.id}" aria-label="Remove from list">×</button></div></div>`; }).join("")}</div>`
     : `<div class="empty"><strong>This list is empty.</strong><span>Open any title and tap “Add to list”.</span></div>`}`;
+}
+
+/* ---------- Collections ---------- */
+// Franchise groupings (MCU, Nolan's Dark Knight trilogy…). Titles are stored by catalogue id,
+// so a collection can hold things you haven't added to your library yet.
+const PRESETS = [
+  { name: "Marvel Cinematic Universe", kind: "tmdb_keyword", q: "marvel cinematic universe", pick: /\(mcu\)/i },
+  { name: "The Dark Knight Trilogy", kind: "tmdb_collection", q: "The Dark Knight" },
+  { name: "Star Wars", kind: "tmdb_collection", q: "Star Wars" },
+  { name: "Harry Potter", kind: "tmdb_collection", q: "Harry Potter" },
+  { name: "The Lord of the Rings", kind: "tmdb_collection", q: "The Lord of the Rings" },
+  { name: "The Hobbit", kind: "tmdb_collection", q: "The Hobbit" },
+  { name: "John Wick", kind: "tmdb_collection", q: "John Wick" },
+  { name: "Mission: Impossible", kind: "tmdb_collection", q: "Mission: Impossible" },
+  { name: "Fast & Furious", kind: "tmdb_collection", q: "The Fast and the Furious" },
+  { name: "James Bond", kind: "tmdb_collection", q: "James Bond" },
+  { name: "Jurassic Park", kind: "tmdb_collection", q: "Jurassic Park" },
+  { name: "The Matrix", kind: "tmdb_collection", q: "The Matrix" },
+  { name: "The Godfather", kind: "tmdb_collection", q: "The Godfather" },
+  { name: "Back to the Future", kind: "tmdb_collection", q: "Back to the Future" },
+  { name: "Indiana Jones", kind: "tmdb_collection", q: "Indiana Jones" },
+  { name: "Rocky", kind: "tmdb_collection", q: "Rocky" },
+  { name: "Toy Story", kind: "tmdb_collection", q: "Toy Story" },
+  { name: "The Hunger Games", kind: "tmdb_collection", q: "The Hunger Games" },
+];
+const COLS_MISSING = "Collections need a database update: run migrations/003_collections.sql in Supabase";
+const colErr = (e) => (/collection/.test(e?.message || "") && /exist|find|schema cache/i.test(e.message) ? COLS_MISSING : e?.message || String(e));
+const COL = { filter: "all", edit: false };
+const colOf = (id) => S.cols.find((c) => c.id === id);
+const relKey = (m) => m.release_date || (m.year ? `${m.year}-12-31` : "9999");
+const byRelease = (a, b) => relKey(a).localeCompare(relKey(b)) || a.title.localeCompare(b.title);
+const colRows = (cid) => S.colItems.filter((x) => x.collection_id === cid && !x.hidden).sort(byRelease);
+const isDone = (m) => S.items.get(keyOf(m.media_type, m.source, m.ext_id))?.status === "finished";
+const isOut = (m) => (m.release_date ? m.release_date <= today() : !!m.year && m.year < new Date().getFullYear());
+const sameMember = (a, b) => a.collection_id === b.collection_id && a.media_type === b.media_type && a.source === b.source && a.ext_id === b.ext_id;
+function mergeColItems(rows) {
+  for (const r of rows) { const i = S.colItems.findIndex((x) => sameMember(x, r)); if (i >= 0) S.colItems[i] = r; else S.colItems.push(r); }
+}
+function colProgress(cid) {
+  const rows = colRows(cid), out = rows.filter(isOut);
+  return { total: rows.length, out: out.length, done: out.filter(isDone).length, upcoming: rows.length - out.length };
+}
+const colsWith = (m) => S.cols.filter((c) => S.colItems.some((x) => x.collection_id === c.id && !x.hidden && x.media_type === m.media_type && x.source === m.source && x.ext_id === String(m.ext_id)));
+const memberKeys = (cid) => new Set(colRows(cid).map((x) => keyOf(x.media_type, x.source, x.ext_id)));
+
+async function tmdbMembers(c) {
+  if (c.kind === "tmdb_collection") {
+    const d = await tmdb(`/collection/${c.ref}`);
+    return { poster: d.poster_path ? TMDB_IMG + "w342" + d.poster_path : null, list: (d.parts || []).map((p) => metaFromTmdb(p, "movie")) };
+  }
+  const list = [];
+  for (const type of ["movie", "tv"]) {
+    for (let page = 1; page <= 10; page++) {
+      const d = await tmdb(`/discover/${type}`, { with_keywords: c.ref, include_adult: "false", sort_by: "popularity.desc", page: String(page) });
+      list.push(...(d.results || []).map((r) => metaFromTmdb(r, type)));
+      if (page >= (d.total_pages || 1)) break;
+    }
+  }
+  return { poster: null, list };
+}
+// Pull the latest titles from TMDB. Anything you removed stays removed (hidden isn't touched).
+async function syncCollection(c) {
+  const { poster, list } = await tmdbMembers(c);
+  const rows = list.map((m) => ({ collection_id: c.id, media_type: m.media_type, source: m.source, ext_id: m.ext_id, title: m.title, year: m.year, poster: m.poster, release_date: m.release_date, auto: true }));
+  if (rows.length) {
+    const { data, error } = await S.sb.from("collection_items").upsert(rows, { onConflict: "collection_id,media_type,source,ext_id" }).select();
+    if (error) throw new Error(colErr(error));
+    mergeColItems(data);
+  }
+  const { data } = await S.sb.from("collections").update({ synced_at: new Date().toISOString(), poster: c.poster || poster }).eq("id", c.id).select().single();
+  if (data) Object.assign(c, data);
+  return rows.length;
+}
+async function followCollection({ name, kind, ref = null, poster = null }) {
+  const existing = ref != null && S.cols.find((c) => c.kind === kind && c.ref === String(ref));
+  if (existing) { location.hash = `#/collection/${existing.id}`; return existing; }
+  const { data, error } = await S.sb.from("collections").insert({ name, kind, ref: ref == null ? null : String(ref), poster }).select().single();
+  if (error) { toast(colErr(error), true); throw error; }
+  S.cols.unshift(data);
+  if (kind !== "custom") {
+    toast(`Fetching ${name}…`);
+    try { const n = await syncCollection(data); toast(`${name}: ${n} titles`); } catch (e) { toast(e.message === "NO_TMDB" ? "Add your TMDB key in Settings first" : e.message, true); }
+  }
+  location.hash = `#/collection/${data.id}`;
+  return data;
+}
+async function followPreset(p) {
+  if (p.kind === "tmdb_keyword") {
+    const d = await tmdb("/search/keyword", { query: p.q });
+    const r = d.results || [];
+    const k = (p.pick && r.find((x) => p.pick.test(x.name))) || r.find((x) => x.name.toLowerCase() === p.q.toLowerCase()) || r[0];
+    if (!k) return toast("TMDB couldn't find that franchise", true);
+    return followCollection({ name: p.name, kind: "tmdb_keyword", ref: k.id });
+  }
+  const d = await tmdb("/search/collection", { query: p.q });
+  const c = (d.results || [])[0];
+  if (!c) return toast("TMDB couldn't find that franchise", true);
+  return followCollection({ name: p.name, kind: "tmdb_collection", ref: c.id, poster: c.poster_path ? TMDB_IMG + "w342" + c.poster_path : null });
+}
+async function addToCollection(c, m) {
+  const row = { collection_id: c.id, media_type: m.media_type, source: m.source, ext_id: String(m.ext_id), title: m.title, year: m.year ?? null, poster: m.poster ?? null, release_date: m.release_date ?? null, hidden: false };
+  const { data, error } = await S.sb.from("collection_items").upsert(row, { onConflict: "collection_id,media_type,source,ext_id" }).select().single();
+  if (error) { toast(colErr(error), true); throw error; }
+  mergeColItems([data]); toast(`Added to ${c.name}`);
+}
+
+function colCard(c) {
+  const rows = colRows(c.id), p = colProgress(c.id);
+  const pics = rows.filter((r) => r.poster).slice(0, 5);
+  return `<a class="list-card" href="#/collection/${c.id}"><div class="stack">${pics.map((i) => `<div><img src="${esc(i.poster)}" alt="" loading="lazy"></div>`).join("") || `<div></div>`}</div>
+    <div><h2 style="font-size:17px">${esc(c.name)}</h2><p class="hint num">${p.done} of ${p.out} done${p.upcoming ? ` · ${p.upcoming} to come` : ""}</p><span class="progress col-prog"><i style="width:${p.out ? (p.done / p.out) * 100 : 0}%"></i></span></div></a>`;
+}
+function renderCollections() {
+  const head = `<div class="page-head"><div><h1>Collections</h1><p class="sub">Franchises and series grouped together, in release order.</p></div>`;
+  if (S.noCols) { view.innerHTML = `${head}</div><div class="empty"><strong>One more step.</strong><span>Run <b>migrations/003_collections.sql</b> in Supabase (SQL Editor → paste → Run), then reload this page.</span></div>`; return; }
+  const followed = new Set(S.cols.map((c) => c.name));
+  const sugg = PRESETS.filter((p) => !followed.has(p.name));
+  view.innerHTML = `${head}<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" data-act="col-find">Find a franchise</button><button class="btn primary" data-act="col-new">New collection</button></div></div>
+    ${S.cols.length ? `<div class="list-cards">${S.cols.map(colCard).join("")}</div>` : `<div class="empty"><strong>No collections yet.</strong><span>Tap a franchise below, search TMDB with “Find a franchise”, or make your own mix (films, series and games) with “New collection”.</span></div>`}
+    ${sugg.length ? `<section class="section" style="margin-top:28px"><div class="section-head"><h2>Popular franchises</h2><span class="link">Tap to add</span></div><div class="tabs">${sugg.map((p) => `<button class="chip" data-act="col-preset" data-v="${esc(p.name)}">+ ${esc(p.name)}</button>`).join("")}</div></section>` : ""}`;
+}
+async function renderCollection(id) {
+  const c = colOf(id);
+  if (!c) { view.innerHTML = `<div class="empty"><strong>Collection not found.</strong><a class="btn" href="#/collections">All collections</a></div>`; return; }
+  COL.edit = false; COL.filter = "all";
+  drawCollection(c);
+  // check TMDB for new entries about once a week
+  if (c.kind !== "custom" && keys().tmdb && (!c.synced_at || Date.now() - Date.parse(c.synced_at) > 7 * 864e5)) {
+    try { await syncCollection(c); if (parseHash().parts[1] === id) drawCollection(c); } catch (e) { console.warn(e); }
+  }
+}
+function drawCollection(c) {
+  const all = colRows(c.id), p = colProgress(c.id);
+  all.forEach((m) => { const k = keyOf(m.media_type, m.source, m.ext_id); if (!searchCache.has(k)) searchCache.set(k, m); });
+  const types = [...new Set(all.map((r) => r.media_type))];
+  if (TYPES[COL.filter] && !types.includes(COL.filter)) COL.filter = "all";
+  let rows = all;
+  if (COL.filter === "todo") rows = rows.filter((r) => !isDone(r));
+  else if (TYPES[COL.filter]) rows = rows.filter((r) => r.media_type === COL.filter);
+  const hidden = S.colItems.filter((x) => x.collection_id === c.id && x.hidden).length;
+  const filters = [["all", "All"], ["todo", "Still to do"], ...(types.length > 1 ? ["movie", "tv", "game"].filter((t) => types.includes(t)).map((t) => [t, TYPES[t].plural]) : [])];
+  const src = c.kind === "tmdb_collection" ? "From TMDB" : c.kind === "tmdb_keyword" ? "Films and series from TMDB" : "Your own mix";
+  view.innerHTML = `<div class="page-head"><div><a class="link" href="#/collections">← Collections</a><h1>${esc(c.name)}</h1><p class="sub num">${p.done} of ${p.out} done${p.upcoming ? ` · ${p.upcoming} still to come` : ""} · ${src}</p></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">${c.kind !== "custom" ? `<button class="btn" data-act="col-sync" data-id="${c.id}">Refresh</button>` : ""}<button class="btn" data-act="col-add" data-id="${c.id}">Add title</button><button class="btn ${COL.edit ? "primary" : ""}" data-act="col-edit-mode" data-id="${c.id}">${COL.edit ? "Done" : "Edit"}</button></div></div>
+    <span class="progress col-prog big"><i style="width:${p.out ? (p.done / p.out) * 100 : 0}%"></i></span>
+    ${c.description ? `<p class="hint">${esc(c.description)}</p>` : ""}
+    ${COL.edit ? `<div class="action-line"><button class="btn" data-act="col-rename" data-id="${c.id}">Rename</button>${hidden ? `<button class="btn" data-act="col-unhide" data-id="${c.id}">Bring back ${hidden} removed</button>` : ""}<button class="btn danger" data-act="col-del" data-id="${c.id}">Delete collection</button><span class="hint">Tap × to take a title out of this collection.</span></div>` : ""}
+    <div class="action-line"><div class="tabs">${filters.map(([v, l]) => `<button class="chip ${COL.filter === v ? "on" : ""}" ${TYPES[v] ? `data-type="${v}"` : ""} data-act="col-filter" data-id="${c.id}" data-v="${v}">${l}</button>`).join("")}</div></div>
+    ${rows.length ? `<div class="grid">${rows.map((m) => colTile(m, c)).join("")}</div>`
+      : `<div class="empty"><strong>${all.length ? "Nothing left here." : "This collection is empty."}</strong><span>${all.length ? "You've done everything in this filter." : "Use “Add title” to put films, series or games in it."}</span></div>`}`;
+}
+function colTile(m, c) {
+  const soon = isOut(m) ? "" : `<span class="tag soon">${m.release_date ? fmtDate(m.release_date) : "TBA"}</span>`;
+  const x = COL.edit ? `<button class="icon-btn col-x" data-act="col-hide" data-id="${c.id}" data-key="${esc(keyOf(m.media_type, m.source, m.ext_id))}" aria-label="Remove ${esc(m.title)} from this collection">×</button>` : "";
+  return `<div class="col-tile${isDone(m) ? " done" : ""}">${card(m, { quick: !COL.edit, showStatus: true })}${soon}${x}</div>`;
 }
 
 /* ---------- Stats ---------- */
@@ -902,7 +1074,7 @@ async function runImport() {
 }
 async function exportData() {
   const eps = await fetchAll("episodes");
-  const blob = new Blob([JSON.stringify({ exported: new Date().toISOString(), items: allItems(), diary: S.diary, episodes: eps, lists: S.lists, list_items: S.listItems, showcase: S.showcase }, null, 2)], { type: "application/json" });
+  const blob = new Blob([JSON.stringify({ exported: new Date().toISOString(), items: allItems(), diary: S.diary, episodes: eps, lists: S.lists, list_items: S.listItems, showcase: S.showcase, collections: S.cols, collection_items: S.colItems }, null, 2)], { type: "application/json" });
   const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `marquee-backup-${today()}.json`; a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
@@ -1030,6 +1202,98 @@ function openRematch() {
   });
 }
 
+function openColEditor(id) {
+  const c = id ? colOf(id) : null;
+  modal(`<h2>${c ? "Rename collection" : "New collection"}</h2>
+    ${c ? "" : `<p class="hint">Your own mix of films, series and games, e.g. “Christopher Nolan films” or “Batman everything”.</p>`}
+    <div class="field"><label for="ce-name">Name</label><input id="ce-name" class="input" value="${esc(c?.name || "")}"></div>
+    <div class="field"><label for="ce-desc">Description</label><textarea id="ce-desc" class="input" placeholder="Optional">${esc(c?.description || "")}</textarea></div>
+    <div class="modal-actions"><button class="btn ghost" data-act="modal-close">Cancel</button><button class="btn primary" id="ce-save">Save</button></div>`, (m) => {
+    m.querySelector("#ce-save").addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const name = m.querySelector("#ce-name").value.trim(); if (!name) return toast("Give the collection a name", true);
+      const description = m.querySelector("#ce-desc").value.trim() || null;
+      const q = c ? S.sb.from("collections").update({ name, description }).eq("id", c.id) : S.sb.from("collections").insert({ name, description, kind: "custom" });
+      const { data, error } = await q.select().single(); if (error) return toast(colErr(error), true);
+      if (c) Object.assign(c, data); else S.cols.unshift(data);
+      closeModal();
+      if (c) drawCollection(c); else location.hash = `#/collection/${data.id}`;
+    });
+  });
+}
+function openColFind() {
+  modal(`<h2>Find a franchise</h2><p class="hint">Film collections (like the Dark Knight trilogy) and TMDB keywords (like the MCU, which covers films and series).</p>
+    <form id="cf-form" style="display:flex;gap:8px"><input id="cf-q" class="input" placeholder="e.g. Batman, Mad Max, Pixar"><button class="btn primary">Search</button></form>
+    <div id="cf-res" style="display:grid;gap:6px;max-height:55vh;overflow:auto"></div>
+    <div class="modal-actions"><button class="btn ghost" data-act="modal-close">Close</button></div>`, (m) => {
+    let results = [];
+    m.querySelector("#cf-form").addEventListener("submit", async (e) => {
+      e.preventDefault(); const q = m.querySelector("#cf-q").value.trim(); if (!q) return;
+      const out = m.querySelector("#cf-res"); out.innerHTML = `<p class="loading">Searching…</p>`;
+      try {
+        const [cs, ks] = await Promise.all([tmdb("/search/collection", { query: q }), tmdb("/search/keyword", { query: q })]);
+        results = [
+          ...(cs.results || []).slice(0, 10).map((x) => ({ name: x.name, kind: "tmdb_collection", ref: x.id, poster: x.poster_path ? TMDB_IMG + "w154" + x.poster_path : null })),
+          ...(ks.results || []).slice(0, 8).map((x) => ({ name: x.name, kind: "tmdb_keyword", ref: x.id })),
+        ];
+        out.innerHTML = results.map((r, i) => `<button class="btn" style="justify-content:flex-start;text-align:left" data-act="cf-pick" data-i="${i}">${r.poster ? `<img src="${esc(r.poster)}" alt="" style="width:30px;height:44px;object-fit:cover;border-radius:3px">` : `<span class="tag">tag</span>`}<span>${esc(r.name)} <span class="hint">${r.kind === "tmdb_collection" ? "Film collection" : "Keyword · films and series"}</span></span></button>`).join("") || `<p class="hint">No franchises found. Try “New collection” to build your own.</p>`;
+      } catch (err) { out.innerHTML = ""; toast(err.message === "NO_TMDB" ? "Add your TMDB key in Settings first" : err.message, true); }
+    });
+    m.addEventListener("click", async (e) => {
+      const b = e.target.closest('[data-act="cf-pick"]'); if (!b) return; e.stopPropagation();
+      const r = results[+b.dataset.i]; b.disabled = true;
+      // keywords come back lower-case; tidy them up for the page title
+      const name = r.kind === "tmdb_keyword" ? r.name.replace(/\b\w/g, (ch) => ch.toUpperCase()) : r.name;
+      closeModal(); await followCollection({ ...r, name });
+    });
+  });
+}
+function openColAdd(c) {
+  modal(`<h2>Add to ${esc(c.name)}</h2>
+    <form id="ca-form" style="display:flex;gap:8px"><input id="ca-q" class="input" placeholder="Film, series or game"><button class="btn primary">Search</button></form>
+    <div id="ca-res" style="display:grid;gap:6px;max-height:55vh;overflow:auto"></div>
+    <div class="modal-actions"><button class="btn ghost" data-act="modal-close">Done</button></div>`, (m) => {
+    let results = [];
+    m.querySelector("#ca-form").addEventListener("submit", async (e) => {
+      e.preventDefault(); const q = m.querySelector("#ca-q").value.trim(); if (!q) return;
+      const out = m.querySelector("#ca-res"); out.innerHTML = `<p class="loading">Searching…</p>`;
+      const k = keys();
+      const [a, g] = await Promise.allSettled([k.tmdb ? tmdb("/search/multi", { query: q, include_adult: "false" }) : null, k.rawg ? rawg("/games", { search: q, page_size: "8" }) : null]);
+      results = [
+        ...((a.value?.results) || []).filter((r) => r.media_type === "movie" || r.media_type === "tv").slice(0, 12).map((r) => metaFromTmdb(r, r.media_type)),
+        ...((g.value?.results) || []).map((x) => metaFromRawg(x)),
+      ];
+      const have = memberKeys(c.id);
+      out.innerHTML = results.map((r, i) => { const has = have.has(keyOf(r.media_type, r.source, r.ext_id)); return `<button class="btn" style="justify-content:flex-start;text-align:left" data-act="ca-pick" data-i="${i}" ${has ? "disabled" : ""}>${r.poster ? `<img src="${esc(r.poster)}" alt="" style="width:30px;height:44px;object-fit:cover;border-radius:3px">` : ""}<span>${esc(r.title)} <span class="hint">${TYPES[r.media_type].label}${r.year ? " · " + r.year : ""}${has ? " · already in" : ""}</span></span></button>`; }).join("") || `<p class="hint">No results.</p>`;
+    });
+    m.addEventListener("click", async (e) => {
+      const b = e.target.closest('[data-act="ca-pick"]'); if (!b) return; e.stopPropagation();
+      b.disabled = true;
+      try { await addToCollection(c, results[+b.dataset.i]); b.querySelector(".hint").insertAdjacentText("beforeend", " · added ✓"); drawCollection(c); } catch { b.disabled = false; }
+    });
+  });
+}
+function openColPicker() {
+  const meta = current.meta;
+  const inNow = colsWith(meta);
+  modal(`<h2>Add to collection</h2>
+    ${S.cols.length ? `<div style="display:grid;gap:6px">${S.cols.map((c) => { const has = inNow.includes(c); return `<button class="btn" style="justify-content:space-between" data-act="cp-pick" data-id="${c.id}" ${has ? "disabled" : ""}>${esc(c.name)}<span class="hint">${has ? "Already in" : colRows(c.id).length}</span></button>`; }).join("")}</div>` : `<p class="hint">You don't have any collections yet.</p>`}
+    <div class="field"><label for="cp-name">Or start a new one</label><input id="cp-name" class="input" placeholder="e.g. Christopher Nolan films"></div>
+    <div class="modal-actions"><button class="btn ghost" data-act="modal-close">Close</button><button class="btn primary" data-act="cp-new">Create and add</button></div>`, (m) => {
+    m.addEventListener("click", async (e) => {
+      const b = e.target.closest('[data-act="cp-pick"],[data-act="cp-new"]'); if (!b) return; e.stopPropagation();
+      let c = colOf(b.dataset.id);
+      if (b.dataset.act === "cp-new") {
+        const name = m.querySelector("#cp-name").value.trim(); if (!name) return toast("Give the collection a name", true);
+        const { data, error } = await S.sb.from("collections").insert({ name, kind: "custom" }).select().single();
+        if (error) return toast(colErr(error), true);
+        S.cols.unshift(data); c = data;
+      }
+      await addToCollection(c, meta); closeModal(); drawItem();
+    });
+  });
+}
+
 /* ---------- global events ---------- */
 document.addEventListener("click", async (e) => {
   const b = e.target.closest("[data-act]"); if (!b) return;
@@ -1103,6 +1367,32 @@ document.addEventListener("click", async (e) => {
         S.diary = S.diary.filter((d) => d.id !== b.dataset.id); renderDiary(); toast("Entry deleted"); break;
       }
       case "new-list": openListEditor(null); break;
+      case "add-to-col": openColPicker(); break;
+      case "col-new": openColEditor(null); break;
+      case "col-rename": openColEditor(b.dataset.id); break;
+      case "col-find": openColFind(); break;
+      case "col-add": openColAdd(colOf(b.dataset.id)); break;
+      case "col-preset": { const p = PRESETS.find((x) => x.name === b.dataset.v); b.disabled = true; try { await followPreset(p); } catch (err) { toast(err.message === "NO_TMDB" ? "Add your TMDB key in Settings first" : err.message, true); } b.disabled = false; break; }
+      case "col-follow-tmdb": b.disabled = true; await followCollection({ name: b.dataset.name, kind: "tmdb_collection", ref: b.dataset.ref, poster: b.dataset.poster ? TMDB_IMG + "w342" + b.dataset.poster : null }); break;
+      case "col-sync": { const c = colOf(b.dataset.id); b.disabled = true; b.textContent = "Refreshing…"; const n = await syncCollection(c); toast(`Up to date · ${n} titles from TMDB`); drawCollection(c); break; }
+      case "col-edit-mode": COL.edit = !COL.edit; drawCollection(colOf(b.dataset.id)); break;
+      case "col-filter": COL.filter = b.dataset.v; drawCollection(colOf(b.dataset.id)); break;
+      case "col-hide": case "col-unhide": {
+        const c = colOf(b.dataset.id); const hide = act === "col-hide";
+        let q = S.sb.from("collection_items").update({ hidden: hide }).eq("collection_id", c.id);
+        let match = (x) => x.collection_id === c.id && x.hidden;
+        if (hide) { const [mt, src, ...rest] = b.dataset.key.split(":"); const ext = rest.join(":"); q = q.eq("media_type", mt).eq("source", src).eq("ext_id", ext); match = (x) => x.collection_id === c.id && x.media_type === mt && x.source === src && x.ext_id === ext; }
+        const { error } = await q; if (error) throw new Error(colErr(error));
+        S.colItems.filter(match).forEach((x) => (x.hidden = hide));
+        drawCollection(c); break;
+      }
+      case "col-del": {
+        const c = colOf(b.dataset.id);
+        modal(`<h2>Delete “${esc(c.name)}”?</h2><p class="hint">Only the grouping goes. Titles stay in your library with their ratings and statuses.</p><div class="modal-actions"><button class="btn ghost" data-act="modal-close">Cancel</button><button class="btn danger" id="cd-yes">Delete collection</button></div>`, (m) => {
+          m.querySelector("#cd-yes").addEventListener("click", async (ev) => { ev.stopPropagation(); const { error } = await S.sb.from("collections").delete().eq("id", c.id); if (error) return toast(error.message, true); S.cols = S.cols.filter((x) => x.id !== c.id); S.colItems = S.colItems.filter((x) => x.collection_id !== c.id); closeModal(); location.hash = "#/collections"; });
+        });
+        break;
+      }
       case "edit-list": openListEditor(b.dataset.id); break;
       case "del-list": {
         const l = S.lists.find((x) => x.id === b.dataset.id);

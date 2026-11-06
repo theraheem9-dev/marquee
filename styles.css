@@ -269,3 +269,13 @@ textarea.input { min-height: 96px; resize: vertical; }
 .entry.mine { background: color-mix(in srgb, var(--accent, var(--fg)) 9%, transparent); border-radius: 6px; }
 .entry .day small:only-child { font-size: 11px; }
 .entry .btn { padding: 6px 10px; font-size: 13px; white-space: nowrap; }
+
+/* Collections */
+.col-tile { position: relative; display: grid; gap: 4px; align-content: start; min-width: 0; }
+.col-tile.done .poster img { opacity: .45; }
+.col-tile.done .poster::after { content: "✓"; position: absolute; right: 6px; bottom: 6px; width: 24px; height: 24px; border-radius: 50%; background: var(--fg); color: var(--bg); display: grid; place-items: center; font-size: 13px; font-weight: 700; }
+.col-tile .soon { justify-self: start; }
+.col-x { position: absolute; top: 6px; right: 6px; z-index: 3; background: rgba(10, 12, 15, .85); }
+.col-prog { display: block; margin-top: 8px; }
+.col-prog.big { height: 6px; border-radius: 3px; margin: 4px 0 2px; }
+.link-btn { background: none; border: 0; padding: 0; color: var(--fg); text-decoration: underline; cursor: pointer; font: inherit; }

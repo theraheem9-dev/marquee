@@ -4,7 +4,7 @@ A plain-English tour for steering the build without reading every line.
 
 ## What it does
 
-Marquee is a private website for tracking the films, TV series and games you watch and play, a bit like Letterboxd plus a game log. For each title you can set a status (Wishlist, Watchlist/Backlog, Watching/Playing, Watched/Played, Dropped), give it a star rating, write a review, favourite it, log the dates you watched or finished it, tick off TV episodes, record game hours and trophies, make your own lists, and pin a "top four" per type. The Stats page totals it all up. The Calendar page shows release dates: "My releases" for your wishlist and the next episodes of shows you watch, and "All upcoming" for popular films, new series and games coming out, with yours highlighted. You can import your PlayStation and Steam play history from a CSV file.
+Marquee is a private website for tracking the films, TV series and games you watch and play, a bit like Letterboxd plus a game log. For each title you can set a status (Wishlist, Watchlist/Backlog, Watching/Playing, Watched/Played, Dropped), give it a star rating, write a review, favourite it, log the dates you watched or finished it, tick off TV episodes, record game hours and trophies, make your own lists, group franchises into Collections, and pin a "top four" per type. The Stats page totals it all up. The Calendar page shows release dates: "My releases" for your wishlist and the next episodes of shows you watch, and "All upcoming" for popular films, new series and games coming out, with yours highlighted. You can import your PlayStation and Steam play history from a CSV file.
 
 Only you can see your data: you sign in with your password, or with an emailed link (set the password in Settings after your first link sign-in), and the database only returns rows that belong to the signed-in user.
 
@@ -42,7 +42,7 @@ Your own records (statuses, ratings, hours) live only in Supabase. The posters, 
 - **external APIs**: the calls to TMDB and RAWG.
 - **data layer**: loading everything from Supabase at sign-in, and saving/removing titles.
 - **router**: the part after `#` in the address (`#/library`, `#/item/game/rawg/123`) picks which page to draw.
-- One section per page: **Home**, **Search**, **Item detail** (a title's own page), **Library**, **Calendar**, **Diary**, **Lists**, **Stats**, **Settings + import**.
+- One section per page: **Home**, **Search**, **Item detail** (a title's own page), **Library**, **Calendar**, **Diary**, **Lists**, **Collections**, **Stats**, **Settings + import**.
 - **modals**: the pop-up boxes (log a watch, add to list, pin to top four, change a game's match).
 - **global events**: one listener that handles every button press, using each button's `data-act` name.
 - **auth + boot**: the sign-in screen and start-up.
@@ -56,7 +56,8 @@ Your own records (statuses, ratings, hours) live only in Supabase. The posters, 
 5. **TV episodes** are saved one row per episode watched. Ticking the first episode sets the show to Watching; ticking every aired episode of an ended show sets it to Watched.
 6. **Game import.** You upload a CSV (columns: platform, title, hours, last_played, first_played, play_count, trophies, status). Each row is matched to a game you already have, or else searched on RAWG. Hours are kept per platform, so PS5 and Steam rows for the same game add up rather than double-count. Approximate matches are listed so you can fix them with "Wrong game? Change match". With pull request #1, the game then remembers the imported name, so later imports land on your pick.
 7. **Wishlist and calendar.** Wishlist is for things you want but haven't got: not out yet, or out but not bought. The + on a search result adds anything unreleased to Wishlist and anything already out to Watchlist/Backlog. Wishlisted titles stay there until you move them. The Calendar asks TMDB and RAWG for fresh dates each time you open it (films use the UK cinema date when TMDB has one) and saves any changed date back to the title.
-8. **Backup.** Settings → Download backup saves everything as one JSON file.
+8. **Collections.** A collection groups a franchise, such as the Marvel Cinematic Universe or Nolan's Dark Knight trilogy, in release order with a "done" count and progress bar. It can follow a TMDB film collection (the Dark Knight trilogy, Star Wars, John Wick…), follow a TMDB keyword (the MCU, which pulls in both films and series), or be your own mix of films, series and games. Its titles are saved by catalogue id, so it can include things you haven't added to your library yet; the + on a tile adds them. TMDB-based collections check for new entries about once a week (or tap Refresh). Removing a title from a collection (Edit → ×) only hides it there, and Refresh won't bring it back. A film page offers to group its TMDB collection, and Library can filter by collection. Deleting a collection never touches your library.
+9. **Backup.** Settings → Download backup saves everything as one JSON file.
 
 ### The database tables
 
@@ -67,6 +68,7 @@ Your own records (statuses, ratings, hours) live only in Supabase. The posters, 
 | `episodes` | TV episode you've watched |
 | `lists` / `list_items` | list you made / title in a list, with its position |
 | `showcase` | "top four" slot per type |
+| `collections` / `collection_items` | collection (name, where it comes from) / title in it (catalogue id, title, poster, release date, hidden or not) |
 
 ## How to run it
 
@@ -86,6 +88,7 @@ Your own records (statuses, ratings, hours) live only in Supabase. The posters, 
 | Add or change a chart on Stats | `renderStats` in `app.js` |
 | Change the import CSV columns or rules | `runImport` in `app.js`; matching rules in `match.js` |
 | Add a field you track per title | Add a column to `items` (a new file in `migrations/`, plus `schema.sql`), then a box on the title page in `drawItem` and save it with `ensureRow({...})` |
+| Change the suggested franchises on Collections | `PRESETS` at the top of the Collections section in `app.js` |
 | Change the sign-in screen | `renderAuth` in `app.js` |
 | Point at a different database | `config.js` |
 

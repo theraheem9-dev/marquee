@@ -77,6 +77,35 @@ create table if not exists public.showcase (
   primary key (user_id, media_type, slot)
 );
 
+-- collections (franchises such as the MCU) and their titles; see migrations/003_collections.sql
+create table if not exists public.collections (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null default auth.uid() references auth.users on delete cascade,
+  name text not null,
+  description text,
+  kind text not null default 'custom' check (kind in ('tmdb_collection', 'tmdb_keyword', 'custom')),
+  ref text,                          -- TMDB collection id or keyword id
+  poster text,
+  synced_at timestamptz,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.collection_items (
+  user_id uuid not null default auth.uid() references auth.users on delete cascade,
+  collection_id uuid not null references public.collections on delete cascade,
+  media_type text not null check (media_type in ('movie', 'tv', 'game')),
+  source text not null,
+  ext_id text not null,
+  title text not null,
+  year int,
+  poster text,
+  release_date date,
+  auto boolean not null default false,   -- came from TMDB (refresh may update it)
+  hidden boolean not null default false, -- you removed it; refresh won't bring it back
+  added_at timestamptz not null default now(),
+  primary key (collection_id, media_type, source, ext_id)
+);
+
 -- keep items.updated_at current (Home and Library sort by it)
 create or replace function public.touch_updated_at() returns trigger language plpgsql as $$
 begin new.updated_at = now(); return new; end $$;
@@ -87,7 +116,7 @@ create trigger items_touch before update on public.items for each row execute fu
 do $$
 declare t text;
 begin
-  foreach t in array array['items', 'diary', 'episodes', 'lists', 'list_items', 'showcase'] loop
+  foreach t in array array['items', 'diary', 'episodes', 'lists', 'list_items', 'showcase', 'collections', 'collection_items'] loop
     execute format('alter table public.%I enable row level security', t);
     execute format('drop policy if exists "own rows" on public.%I', t);
     execute format('create policy "own rows" on public.%I for all using (user_id = auth.uid()) with check (user_id = auth.uid())', t);
