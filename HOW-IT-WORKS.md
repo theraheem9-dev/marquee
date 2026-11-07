@@ -17,7 +17,7 @@ Think of it as three parties:
 | **The website** (this repo) | Plain HTML, CSS and JavaScript files. No build step: a web host serves the files as they are. | The shop front and the staff |
 | **Supabase** | A hosted database plus sign-in service. Holds everything *you* enter. | The filing cabinet with a lock |
 | **TMDB and RAWG** | Free public catalogues: TMDB for films and TV, RAWG for games. Supply titles, posters, genres, episode lists. | The reference library |
-| **IGDB** (run by Twitch) | Official game box art. Reached through a small Supabase function (`covers`) because IGDB needs a secret key that can't live in the website. The Twitch keys are stored as Supabase secrets. | The poster shop |
+| **IGDB** (run by Twitch) | Game search, game pages and official box art. Reached through small Supabase functions (`games` and `covers`) because IGDB needs a secret key that can't live in the website. The Twitch keys are stored as Supabase secrets. | The poster shop |
 
 Your own records (statuses, ratings, hours) live only in Supabase. The posters, synopses and episode lists come from TMDB/RAWG each time you open a title. Each saved title stores just a few key facts (title, year, poster, genres) so your library loads without asking the catalogues.
 
@@ -30,6 +30,7 @@ Your own records (statuses, ratings, hours) live only in Supabase. The posters, 
 | `config.js` | The Supabase address and its *publishable* key. These are meant to be public; your data is protected by the sign-in and the database rules, not by hiding them. Never put a secret or "service_role" key here. |
 | `app.js` | The whole app, in sections marked with `/* ---------- name ---------- */` headings (listed below). |
 | `match.js` | How an imported game title is matched to a RAWG game and to games already in your library. Kept separate so it can be tested. *(Added by pull request #1.)* |
+| `supabase/functions/games/` | The server function that searches IGDB for games and fetches a game's details (summary, platforms, developer, release date). Search uses it first and falls back to RAWG only if it isn't set up. |
 | `supabase/functions/covers/` | The server function that looks up a game's box art on IGDB. Deployed to Supabase; used by Settings → Game box art and automatically when a game is added. |
 | `schema.sql`, `migrations/` | The database setup: tables, columns and the "owner only" rules. *(Added by pull request #1.)* |
 | `tests/` | Automatic checks for the matching rules, run with `npm test`. *(Added by pull request #1.)* |
@@ -51,7 +52,7 @@ Your own records (statuses, ratings, hours) live only in Supabase. The posters, 
 
 1. **Start-up.** The browser loads `index.html`, which loads `app.js`. The app connects to Supabase, checks whether you're signed in, and if not shows the email sign-in screen.
 2. **Signed in.** The app downloads all your rows at once (titles, diary, lists, list entries, top fours) and keeps them in memory, so moving between pages is instant.
-3. **Searching.** Typing in the top bar asks TMDB and RAWG directly from your browser, using the API keys you pasted in Settings. Those keys are stored only in that browser, so you paste them once per device. Films/TV and games appear separately as each service answers, so a slow RAWG doesn't hold up TMDB results; answers are reused for 10 minutes, and a service that hasn't replied after 10–15 seconds shows an error instead of spinning forever.
+3. **Searching.** Typing in the top bar asks TMDB (films and TV) directly from your browser, and IGDB (games) through the `games` Supabase function. RAWG is only used for game search if that function isn't set up. The TMDB and RAWG keys you pasted in Settings are stored only in that browser. You paste them once per device. Films/TV and games appear separately as each service answers, so one slow service doesn't hold up the other; answers are reused for 10 minutes, and a service that hasn't replied after 10–15 seconds shows an error instead of spinning forever.
 4. **Changing something.** Setting a status, rating or hours saves that one change to Supabase straight away, then redraws the page. The first time you touch a title, it is added to your library.
 5. **TV episodes** are saved one row per episode watched. Ticking the first episode sets the show to Watching; ticking every aired episode of an ended show sets it to Watched.
 6. **Game import.** You upload a CSV (columns: platform, title, hours, last_played, first_played, play_count, trophies, status). Each row is matched to a game you already have, or else searched on RAWG. Hours are kept per platform, so PS5 and Steam rows for the same game add up rather than double-count. Approximate matches are listed so you can fix them with "Wrong game? Change match". With pull request #1, the game then remembers the imported name, so later imports land on your pick.

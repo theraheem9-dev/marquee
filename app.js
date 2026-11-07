@@ -103,6 +103,32 @@ function metaFromRawg(g, full = false) {
   return m;
 }
 
+// Games from IGDB, through the "games" Supabase function (it holds the Twitch keys).
+// Throws "NO_IGDB" when the function or its keys aren't set up, so callers can fall back to RAWG.
+const IGDB = { off: false };
+async function igdb(body, ms = 12000) {
+  if (IGDB.off) throw new Error("NO_IGDB");
+  const call = S.sb.functions.invoke("games", { body });
+  const timer = new Promise((_, no) => setTimeout(() => no(Object.assign(new Error("timeout"), { name: "TimeoutError" })), ms));
+  const { data, error } = await Promise.race([call, timer]);
+  if (error) {
+    const b = await error.context?.json?.().catch(() => null);
+    if (b?.error === "NO_KEYS" || error.context?.status === 404) { IGDB.off = true; throw new Error("NO_IGDB"); }
+    throw new Error(b?.error || error.message);
+  }
+  return data;
+}
+const metaFromIgdb = (g) => ({ media_type: "game", source: "igdb", ext_id: g.id, title: g.title, year: g.year, poster: g.poster, release_date: g.release_date, genres: g.genres || [] });
+// An IGDB result you already own under its older RAWG id: show your copy instead, so it isn't added twice.
+function ownedGame(m) {
+  const n = norm(m.title);
+  for (const i of S.items.values()) {
+    if (i.media_type !== "game" || i.source === "igdb" || norm(i.title) !== n) continue;
+    if (!m.year || !i.year || Math.abs(m.year - i.year) <= 1) return i;
+  }
+  return null;
+}
+
 /* ---------- data layer ---------- */
 async function fetchAll(table, order) {
   const out = []; const page = 1000;
@@ -357,7 +383,7 @@ function searchBlock(list) {
 }
 async function renderSearch(q, type) {
   $("#top-q").value = q;
-  view.innerHTML = `<div class="page-head"><div><h1>${q ? `Results for “${esc(q)}”` : "Search"}</h1><p class="sub">Films and TV from TMDB, games from RAWG.</p></div>${typeTabs(type, "search-type")}</div><div id="results">${q ? "" : `<p class="loading">Type a title in the search bar.</p>`}</div>`;
+  view.innerHTML = `<div class="page-head"><div><h1>${q ? `Results for “${esc(q)}”` : "Search"}</h1><p class="sub">Films and TV from TMDB, games from IGDB.</p></div>${typeTabs(type, "search-type")}</div><div id="results">${q ? "" : `<p class="loading">Type a title in the search bar.</p>`}</div>`;
   if (!q) return;
   const k = keys(); const wantFilm = type === "all" || type === "movie" || type === "tv"; const wantGame = type === "all" || type === "game";
   const out = $("#results");
@@ -382,9 +408,12 @@ async function renderSearch(q, type) {
   if (wantFilm) addSlot("films and TV", () => k.tmdb
     ? cachedSearch("tmdb", type, q, () => tmdb("/search/multi", { query: q, include_adult: "false" }).then((d) => d.results.filter((r) => (r.media_type === "movie" || r.media_type === "tv") && (type === "all" || r.media_type === type)).map((r) => metaFromTmdb(r, r.media_type))))
     : Promise.resolve("NO_TMDB"));
-  if (wantGame) addSlot("games", () => k.rawg
+  const rawgSearch = () => k.rawg
     ? cachedSearch("rawg", "game", q, () => rawg("/games", { search: q, page_size: "12", search_precise: "true" }).then((d) => d.results.map((g) => metaFromRawg(g))))
-    : Promise.resolve("NO_RAWG"));
+    : Promise.resolve("NO_RAWG");
+  // IGDB first; RAWG only if the IGDB function isn't set up
+  if (wantGame) addSlot("games", () => cachedSearch("igdb", "game", q, () => igdb({ search: q }).then((d) => d.results.map((g) => ownedGame(g) || metaFromIgdb(g))))
+    .catch((e) => (e.message === "NO_IGDB" ? rawgSearch() : Promise.reject(e))));
   const counts = await Promise.all(slots);
   if (parseHash().q.get("q") !== q) return;
   if (counts.every((n) => n === 0) && !out.querySelector(".empty")) out.innerHTML = `<div class="empty"><strong>No matches.</strong><span>Try a shorter title or check the spelling.</span></div>`;
@@ -410,6 +439,10 @@ async function renderItem(type, source, ext) {
           : [`${d.number_of_seasons} season${d.number_of_seasons === 1 ? "" : "s"}`, `${d.number_of_episodes} episodes`, d.status, (d.networks || []).map((n) => n.name).slice(0, 2).join(", "), (meta.genres || []).join(" · ")],
         cast,
       };
+    } else if (source === "igdb") {
+      d = (await igdb({ id: ext })).game;
+      meta = { ...meta, ...metaFromIgdb(d) };
+      extra = { overview: d.overview, backdrop: d.backdrop, facts: [d.developers.slice(0, 2).join(", "), (meta.genres || []).join(" · ")], platforms: d.platforms };
     } else if (source === "rawg") {
       d = await rawg(`/games/${ext}`);
       meta = { ...meta, ...metaFromRawg(d, true) };
@@ -421,7 +454,7 @@ async function renderItem(type, source, ext) {
     }
   } catch (e) {
     if (!mine) {
-      view.innerHTML = e.message === "NO_TMDB" ? needKeys("TMDB") : e.message === "NO_RAWG" ? needKeys("RAWG") : `<div class="empty"><strong>Couldn't load this title.</strong><span>${esc(e.message)}</span></div>`;
+      view.innerHTML = e.message === "NO_TMDB" ? needKeys("TMDB") : e.message === "NO_RAWG" ? needKeys("RAWG") : e.message === "NO_IGDB" ? `<div class="empty"><strong>IGDB isn't set up.</strong><span>Add your Twitch keys in Supabase (Edge Functions → Secrets).</span></div>` : `<div class="empty"><strong>Couldn't load this title.</strong><span>${esc(e.message)}</span></div>`;
       return;
     }
     extra = { overview: "", facts: [] }; // show what we have saved
@@ -660,6 +693,8 @@ async function loadMine() {
           else if (i.status === "wishlist") date = d.first_air_date || null;
           else return; // watching, nothing scheduled
         }
+      } else if (i.source === "igdb") {
+        date = (await igdb({ id: i.ext_id })).game.release_date;
       } else if (i.source === "rawg" && k.rawg) {
         const g = await rawg(`/games/${i.ext_id}`); date = g.tba ? null : g.released || null;
       } else if (i.status !== "wishlist") return;
