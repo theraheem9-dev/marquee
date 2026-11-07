@@ -50,6 +50,8 @@ const dropItem = (row) => { S.items.delete(keyOf(row.media_type, row.source, row
 const cleanKey = (v) => (v || "").replace(/^\s*bearer\s+/i, "").replace(/[\s"'\u200B-\u200D\uFEFF]/g, "");
 const keys = () => ({ tmdb: store.get("m.tmdb"), rawg: store.get("m.rawg") });
 const TMDB_IMG = "https://image.tmdb.org/t/p/";
+// gives up on a request that hangs, so the page shows an error instead of "Searching…" forever
+const timeoutSignal = (ms) => (AbortSignal.timeout ? AbortSignal.timeout(ms) : undefined);
 async function tmdb(path, params = {}) {
   const k = cleanKey(keys().tmdb); if (!k) throw new Error("NO_TMDB");
   const url = new URL("https://api.themoviedb.org/3" + path);
@@ -57,7 +59,7 @@ async function tmdb(path, params = {}) {
   if (k.startsWith("eyJ")) headers.Authorization = "Bearer " + k; else url.searchParams.set("api_key", k);
   url.searchParams.set("language", "en-GB");
   for (const [a, b] of Object.entries(params)) url.searchParams.set(a, b);
-  const r = await fetch(url, { headers });
+  const r = await fetch(url, { headers, signal: timeoutSignal(10000) });
   if (!r.ok) throw new Error(r.status === 401 ? "TMDB rejected your key. Check it in Settings." : `TMDB error ${r.status}`);
   return r.json();
 }
@@ -66,7 +68,7 @@ async function rawg(path, params = {}) {
   const url = new URL("https://api.rawg.io/api" + path);
   url.searchParams.set("key", k);
   for (const [a, b] of Object.entries(params)) url.searchParams.set(a, b);
-  const r = await fetch(url);
+  const r = await fetch(url, { signal: timeoutSignal(15000) });
   if (!r.ok) throw new Error(r.status === 401 ? "RAWG rejected your key. Check it in Settings." : `RAWG error ${r.status}`);
   return r.json();
 }
@@ -334,30 +336,58 @@ function renderHome() {
 }
 
 /* ---------- Search ---------- */
+// Films/TV (TMDB) and games (RAWG) are fetched side by side and each block is shown as soon as
+// it arrives, so a slow RAWG never holds up TMDB results. Answers are kept for 10 minutes, so
+// going back to a search or switching type tabs is instant.
 const searchCache = new Map();
+const resultCache = new Map(); // "src|type|query" -> { at, list }
+const RESULT_TTL = 10 * 60 * 1000;
+async function cachedSearch(src, type, q, fetcher) {
+  const key = `${src}|${type}|${q.trim().toLowerCase()}`;
+  const hit = resultCache.get(key);
+  if (hit && Date.now() - hit.at < RESULT_TTL) return hit.list;
+  const list = await fetcher();
+  resultCache.set(key, { at: Date.now(), list });
+  return list;
+}
+function searchBlock(list) {
+  list.forEach((m) => searchCache.set(keyOf(m.media_type, m.source, m.ext_id), m));
+  return ["movie", "tv", "game"].map((t) => [t, list.filter((m) => m.media_type === t)]).filter(([, l]) => l.length)
+    .map(([t, l]) => `<section class="section" style="margin-bottom:26px"><div class="section-head"><h2>${TYPES[t].plural}</h2><span class="link">${l.length} results</span></div><div class="grid">${l.map((m) => card(m, { quick: true, showStatus: true })).join("")}</div></section>`).join("");
+}
 async function renderSearch(q, type) {
   $("#top-q").value = q;
-  view.innerHTML = `<div class="page-head"><div><h1>${q ? `Results for “${esc(q)}”` : "Search"}</h1><p class="sub">Films and TV from TMDB, games from RAWG.</p></div>${typeTabs(type, "search-type")}</div><div id="results"><p class="loading">${q ? "Searching…" : "Type a title in the search bar."}</p></div>`;
+  view.innerHTML = `<div class="page-head"><div><h1>${q ? `Results for “${esc(q)}”` : "Search"}</h1><p class="sub">Films and TV from TMDB, games from RAWG.</p></div>${typeTabs(type, "search-type")}</div><div id="results">${q ? "" : `<p class="loading">Type a title in the search bar.</p>`}</div>`;
   if (!q) return;
   const k = keys(); const wantFilm = type === "all" || type === "movie" || type === "tv"; const wantGame = type === "all" || type === "game";
-  const tasks = [];
-  if (wantFilm) tasks.push(k.tmdb ? tmdb("/search/multi", { query: q, include_adult: "false" }).then((d) => d.results.filter((r) => (r.media_type === "movie" || r.media_type === "tv") && (type === "all" || r.media_type === type)).map((r) => metaFromTmdb(r, r.media_type))) : Promise.resolve("NO_TMDB"));
-  if (wantGame) tasks.push(k.rawg ? rawg("/games", { search: q, page_size: "20", search_precise: "true" }).then((d) => d.results.map((g) => metaFromRawg(g))) : Promise.resolve("NO_RAWG"));
-  const res = await Promise.allSettled(tasks);
-  if (parseHash().q.get("q") !== q) return; // user moved on
   const out = $("#results");
-  let html = ""; const found = [];
-  res.forEach((r) => {
-    if (r.status === "rejected") html += `<div class="empty"><strong>Search failed.</strong><span>${esc(r.reason.message)}</span></div>`;
-    else if (r.value === "NO_TMDB") html += needKeys("TMDB");
-    else if (r.value === "NO_RAWG") html += needKeys("RAWG");
-    else found.push(...r.value);
-  });
-  found.forEach((m) => searchCache.set(keyOf(m.media_type, m.source, m.ext_id), m));
-  const groups = ["movie", "tv", "game"].map((t) => [t, found.filter((m) => m.media_type === t)]).filter(([, l]) => l.length);
-  html += groups.map(([t, l]) => `<section class="section" style="margin-bottom:26px"><div class="section-head"><h2>${TYPES[t].plural}</h2><span class="link">${l.length} results</span></div><div class="grid">${l.map((m) => card(m, { quick: true, showStatus: true })).join("")}</div></section>`).join("");
-  if (!found.length && !html) html = `<div class="empty"><strong>No matches.</strong><span>Try a shorter title or check the spelling.</span></div>`;
-  out.innerHTML = html;
+  const slots = [];
+  const addSlot = (label, run) => {
+    const el = document.createElement("div");
+    el.innerHTML = `<p class="loading">Searching ${label}…</p>`;
+    out.appendChild(el);
+    const p = run().then((v) => {
+      if (parseHash().q.get("q") !== q) return 0; // user moved on
+      if (v === "NO_TMDB" || v === "NO_RAWG") { el.innerHTML = needKeys(v.slice(3)); return 0; }
+      el.innerHTML = searchBlock(v);
+      return v.length;
+    }, (e) => {
+      if (parseHash().q.get("q") !== q) return 0;
+      const msg = e.name === "TimeoutError" ? `${label} is taking too long to answer. Try again in a moment.` : e.message;
+      el.innerHTML = `<div class="empty"><strong>${label} search failed.</strong><span>${esc(msg)}</span></div>`;
+      return -1;
+    });
+    slots.push(p);
+  };
+  if (wantFilm) addSlot("films and TV", () => k.tmdb
+    ? cachedSearch("tmdb", type, q, () => tmdb("/search/multi", { query: q, include_adult: "false" }).then((d) => d.results.filter((r) => (r.media_type === "movie" || r.media_type === "tv") && (type === "all" || r.media_type === type)).map((r) => metaFromTmdb(r, r.media_type))))
+    : Promise.resolve("NO_TMDB"));
+  if (wantGame) addSlot("games", () => k.rawg
+    ? cachedSearch("rawg", "game", q, () => rawg("/games", { search: q, page_size: "12", search_precise: "true" }).then((d) => d.results.map((g) => metaFromRawg(g))))
+    : Promise.resolve("NO_RAWG"));
+  const counts = await Promise.all(slots);
+  if (parseHash().q.get("q") !== q) return;
+  if (counts.every((n) => n === 0) && !out.querySelector(".empty")) out.innerHTML = `<div class="empty"><strong>No matches.</strong><span>Try a shorter title or check the spelling.</span></div>`;
 }
 
 /* ---------- Item detail ---------- */
